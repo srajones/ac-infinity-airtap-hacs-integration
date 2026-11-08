@@ -6,15 +6,16 @@
       },
       "user": {
         "title": "Select AirTap vent",
+        "description": "Select an AC Infinity fan or controller to configure, or enter its address manually.",
         "data": {
           "address": "Device"
         }
       },
       "manual": {
         "title": "Connect by Bluetooth address",
-        "description": "Enter the vent Bluetooth MAC address. Setup must receive a valid mode/speed reply.",
+        "description": "Enter the Bluetooth MAC address of your AC Infinity device (e.g., A4:C1:38:F6:48:F6).",
         "data": {
-          "address": "Bluetooth MAC address"
+          "address": "Bluetooth Address (MAC)"
         }
       }
     },
@@ -24,16 +25,31 @@
       "unsupported_model": "The device does not expose a supported AC Infinity notify/write pair, or its advertisement is invalid."
     },
     "error": {
+      "cannot_connect": "Failed to connect to the device.",
       "connect_failed": "Could not establish a Bluetooth connection. Check the adapter, vent power, and whether another client is connected.",
-      "service_failed": "Connected, but Bluetooth service discovery failed. See the debug log for the discovered services.",
-      "unsupported_model": "The device does not expose a supported AC Infinity notify/write pair, or its advertisement is invalid.",
-      "notify_failed": "Connected, but subscribing to vent notifications failed. See the debug log for the characteristic and error.",
-      "write_failed": "Connected, but the Bluetooth command could not be written. See the debug log for its write properties.",
-      "no_response": "Connected and sent a command (clock initialization or query), but no valid matching reply arrived after bounded retries. Download the debug log.",
-      "invalid_response": "The vent replied, but its mode/speed data is missing or unsupported. Download the debug log.",
-      "unknown": "An unexpected error occurred. See the Home Assistant log.",
       "disconnect_failed": "The Bluetooth session could not be cleanly released. Check the debug log and adapter before retrying.",
-      "initialization_failed": "The vent rejected clock initialization or returned an unexpected clock acknowledgement. No fan or mode changes were sent. Download the debug log."
+      "initialization_failed": "The vent rejected clock initialization or returned an unexpected clock acknowledgement. No fan or mode changes were sent. Download the debug log.",
+      "invalid_address": "Invalid Bluetooth MAC address format.",
+      "invalid_response": "The vent replied, but its mode/speed data is missing or unsupported. Download the debug log.",
+      "no_response": "Connected and sent a command (clock initialization or query), but no valid matching reply arrived after bounded retries. Download the debug log.",
+      "not_ac_infinity_device": "The specified Bluetooth device is not a recognized AC Infinity device.",
+      "notify_failed": "Connected, but subscribing to vent notifications failed. See the debug log for the characteristic and error.",
+      "service_failed": "Connected, but Bluetooth service discovery failed. See the debug log for the discovered services.",
+      "unknown": "An unexpected error occurred.",
+      "unsupported_model": "The device does not expose a supported AC Infinity notify/write pair, or its advertisement is invalid.",
+      "write_failed": "Connected, but the Bluetooth command could not be written. See the debug log for its write properties."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "AC Infinity Options",
+        "description": "Configure operation modes and polling intervals.",
+        "data": {
+          "scan_interval": "Update interval (seconds)",
+          "passive_only": "Passive advertisement mode only (no active GATT connections)"
+        }
+      }
     }
   }
 }

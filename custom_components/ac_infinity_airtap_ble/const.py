@@ -68,3 +68,10 @@ def get_device_model_name(device_type: int | None) -> str:
     if device_type is None:
         return "AC Infinity Device"
     return DEVICE_MODEL.get(device_type, f"AC Infinity Device (Type {device_type})")
+
+
+CONF_SCAN_INTERVAL = "scan_interval"
+DEFAULT_SCAN_INTERVAL = 15
+CONF_PASSIVE_ONLY = "passive_only"
+AC_INFINITY_SERVICE_UUID = "70d51000-2c7f-4e75-ae8a-d758951ce4e0"
+
