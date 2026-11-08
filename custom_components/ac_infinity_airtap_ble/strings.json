@@ -21,11 +21,21 @@
           "passive_only": "Passive advertisement mode only (no active GATT connections)",
           "attempt_pairing": "Attempt Bluetooth pairing on connection retry"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure AC Infinity Device",
+        "description": "Update operation modes and polling intervals.",
+        "data": {
+          "scan_interval": "Update interval (seconds)",
+          "passive_only": "Passive advertisement mode only (no active GATT connections)",
+          "attempt_pairing": "Attempt Bluetooth pairing on connection retry"
+        }
       }
     },
     "abort": {
       "single_instance_allowed": "[%key:common::config_flow::abort::single_instance_allowed%]",
       "no_devices_found": "[%key:common::config_flow::abort::no_devices_found%]",
+      "reconfigure_successful": "Reconfiguration was successful.",
       "unsupported_model": "The device does not expose a supported AC Infinity notify/write pair, or its advertisement is invalid."
     },
     "error": {

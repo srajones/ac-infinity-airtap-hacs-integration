@@ -13,7 +13,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import slugify
 
-from .const import DOMAIN, MANUFACTURER, get_device_model_name
+from .const import DOMAIN, MANUFACTURER, get_device_model_name, is_passive_mode
 from .coordinator import (ACInfinityDataUpdateCoordinator,
                           ActiveBluetoothCoordinatorEntity)
 from .device import (AUTO_TRIGGER_RANGE_C, AUTO_TRIGGER_RANGE_F,
@@ -89,6 +89,8 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     data: ACInfinityData = hass.data[DOMAIN][entry.entry_id]
+    if is_passive_mode(entry, data.device):
+        return
     entities: list[ACInfinityNumber] = [
         ACInfinityOffSpeed(data.coordinator, data.device),
         ACInfinityOnSpeed(data.coordinator, data.device),
@@ -176,7 +178,12 @@ class ACInfinityOffSpeed(ACInfinityNumber):
 
     @callback
     def _update_attrs(self) -> None:
-        self._attr_native_value = self._device.state.level_off
+        if self._device.state.level_off is not None:
+            self._attr_native_value = self._device.state.level_off
+        elif self._device.state.work_type is not None:
+            self._attr_native_value = 0
+        else:
+            self._attr_native_value = None
 
 
 class ACInfinityOnSpeed(ACInfinityNumber):
@@ -202,7 +209,12 @@ class ACInfinityOnSpeed(ACInfinityNumber):
 
     @callback
     def _update_attrs(self) -> None:
-        self._attr_native_value = self._device.state.level_on
+        if self._device.state.level_on is not None:
+            self._attr_native_value = self._device.state.level_on
+        elif self._device.state.fan is not None and self._device.state.fan > 0:
+            self._attr_native_value = self._device.state.fan
+        else:
+            self._attr_native_value = None
 
 
 class ACInfinityTemperatureNumber(ACInfinityNumber):

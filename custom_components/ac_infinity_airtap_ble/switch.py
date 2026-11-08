@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import slugify
 
-from .const import DOMAIN, MANUFACTURER, get_device_model_name
+from .const import DOMAIN, MANUFACTURER, get_device_model_name, is_passive_mode
 from .coordinator import (ACInfinityDataUpdateCoordinator,
                           ActiveBluetoothCoordinatorEntity)
 from .device import ACInfinityDevice
@@ -25,6 +25,8 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     data: ACInfinityData = hass.data[DOMAIN][entry.entry_id]
+    if is_passive_mode(entry, data.device):
+        return
     async_add_entities(
         [
             ACInfinityDisplaySwitch(data.coordinator, data.device, "Display"),

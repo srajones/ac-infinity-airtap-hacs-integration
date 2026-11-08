@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import logging
 import re
@@ -26,8 +27,8 @@ try:
 except (ImportError, AttributeError):
     class OptionsFlow:  # type: ignore[no-redef]
         """Fallback OptionsFlow."""
-        def __init__(self, config_entry: Any = None) -> None:
-            self.config_entry = config_entry
+        def __init__(self) -> None:
+            pass
         def async_show_form(self, **kwargs: Any) -> FlowResult:
             return kwargs
         def async_create_entry(self, **kwargs: Any) -> FlowResult:
@@ -270,6 +271,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if hasattr(controller, "stop") and callable(controller.stop):
                     await controller.stop()
                 if not errors:
+                    for rev_attr in ("firmware_revision", "hardware_revision", "software_revision"):
+                        val = getattr(controller, rev_attr, None)
+                        if val is not None and hasattr(controller.state, rev_attr):
+                            setattr(controller.state, rev_attr, val)
                     return self.async_create_entry(
                         title=controller.name,
                         data={
@@ -479,6 +484,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if hasattr(controller, "stop") and callable(controller.stop):
                     await controller.stop()
                 if fallback_ok and "base" not in errors:
+                    for rev_attr in ("firmware_revision", "hardware_revision", "software_revision"):
+                        val = getattr(controller, rev_attr, None)
+                        if val is not None and hasattr(controller.state, rev_attr):
+                            setattr(controller.state, rev_attr, val)
                     return self.async_create_entry(
                         title=controller.name or address,
                         data={
@@ -505,6 +514,89 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    def _get_reconfigure_config_entry(self) -> config_entries.ConfigEntry | None:
+        """Retrieve the ConfigEntry being reconfigured."""
+        if hasattr(self, "_get_reconfigure_entry"):
+            with contextlib.suppress(Exception):
+                entry = self._get_reconfigure_entry()
+                if entry is not None:
+                    return entry
+        ctx = getattr(self, "context", None)
+        entry_id = ctx.get("entry_id") if isinstance(ctx, dict) else None
+        hass = getattr(self, "hass", None)
+        if entry_id and hass and hasattr(hass, "config_entries"):
+            with contextlib.suppress(Exception):
+                return hass.config_entries.async_get_entry(entry_id)
+        return None
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle reconfiguration of an existing AC Infinity config entry."""
+        entry = self._get_reconfigure_config_entry()
+        options = entry.options if entry and getattr(entry, "options", None) else {}
+        data = entry.data if entry and getattr(entry, "data", None) else {}
+
+        if user_input is not None:
+            new_options = {
+                **options,
+                CONF_SCAN_INTERVAL: user_input.get(
+                    CONF_SCAN_INTERVAL,
+                    options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+                ),
+                CONF_PASSIVE_ONLY: user_input.get(CONF_PASSIVE_ONLY, False),
+                CONF_ATTEMPT_PAIRING: user_input.get(CONF_ATTEMPT_PAIRING, False),
+            }
+            hass = getattr(self, "hass", None)
+            if entry is not None and hass is not None and hasattr(hass, "config_entries"):
+                if (
+                    DOMAIN in getattr(hass, "data", {})
+                    and entry.entry_id in hass.data[DOMAIN]
+                ):
+                    entry_data = hass.data[DOMAIN][entry.entry_id]
+                    if hasattr(entry_data, "device") and hasattr(
+                        entry_data.device, "attempt_pairing"
+                    ):
+                        entry_data.device.attempt_pairing = new_options[CONF_ATTEMPT_PAIRING]
+                if hasattr(hass.config_entries, "async_update_entry"):
+                    hass.config_entries.async_update_entry(entry, options=new_options)
+                if hasattr(hass.config_entries, "async_reload"):
+                    await hass.config_entries.async_reload(entry.entry_id)
+            if hasattr(self, "async_update_reload_and_abort") and entry is not None:
+                with contextlib.suppress(Exception):
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        options=new_options,
+                    )
+            return self.async_abort(reason="reconfigure_successful")
+
+        data_schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_SCAN_INTERVAL,
+                    default=options.get(
+                        CONF_SCAN_INTERVAL,
+                        data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=5, max=300)),
+                vol.Optional(
+                    CONF_PASSIVE_ONLY,
+                    default=options.get(
+                        CONF_PASSIVE_ONLY,
+                        data.get(CONF_PASSIVE_ONLY, False),
+                    ),
+                ): bool,
+                vol.Optional(
+                    CONF_ATTEMPT_PAIRING,
+                    default=options.get(
+                        CONF_ATTEMPT_PAIRING,
+                        data.get(CONF_ATTEMPT_PAIRING, False),
+                    ),
+                ): bool,
+            }
+        )
+        return self.async_show_form(step_id="reconfigure", data_schema=data_schema)
+
     @staticmethod
     @callback
     def async_get_options_flow(
@@ -517,42 +609,67 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class ACInfinityOptionsFlowHandler(OptionsFlow):
     """Handle options flow for AC Infinity integration."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+    def __init__(
+        self, config_entry: config_entries.ConfigEntry | None = None
+    ) -> None:
         """Initialize options flow."""
-        super().__init__(config_entry)
-        self.config_entry = config_entry
+        super().__init__()
+        self._config_entry = config_entry
+        if not isinstance(getattr(type(self), "config_entry", None), property):
+            with contextlib.suppress(AttributeError):
+                self.config_entry = config_entry
+
+    @property
+    def _entry(self) -> config_entries.ConfigEntry | None:
+        """Return config_entry from HA property or __init__ fallback."""
+        with contextlib.suppress(Exception):
+            entry = getattr(self, "config_entry", None)
+            if entry is not None:
+                return entry
+        return self._config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage the options."""
+        entry = self._entry
         if user_input is not None:
             hass = getattr(self, "hass", None)
             if (
-                self.config_entry
+                entry
                 and hass
                 and DOMAIN in hass.data
-                and self.config_entry.entry_id in hass.data[DOMAIN]
+                and entry.entry_id in hass.data[DOMAIN]
             ):
-                entry_data = hass.data[DOMAIN][self.config_entry.entry_id]
+                entry_data = hass.data[DOMAIN][entry.entry_id]
                 if hasattr(entry_data, "device") and hasattr(entry_data.device, "attempt_pairing"):
                     entry_data.device.attempt_pairing = user_input.get(CONF_ATTEMPT_PAIRING, False)
             return self.async_create_entry(title="", data=user_input)
 
-        options = self.config_entry.options if self.config_entry else {}
+        options = entry.options if entry and getattr(entry, "options", None) else {}
+        data = entry.data if entry and getattr(entry, "data", None) else {}
         data_schema = vol.Schema(
             {
                 vol.Optional(
                     CONF_SCAN_INTERVAL,
-                    default=options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+                    default=options.get(
+                        CONF_SCAN_INTERVAL,
+                        data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+                    ),
                 ): vol.All(vol.Coerce(int), vol.Range(min=5, max=300)),
                 vol.Optional(
                     CONF_PASSIVE_ONLY,
-                    default=options.get(CONF_PASSIVE_ONLY, False),
+                    default=options.get(
+                        CONF_PASSIVE_ONLY,
+                        data.get(CONF_PASSIVE_ONLY, False),
+                    ),
                 ): bool,
                 vol.Optional(
                     CONF_ATTEMPT_PAIRING,
-                    default=options.get(CONF_ATTEMPT_PAIRING, False),
+                    default=options.get(
+                        CONF_ATTEMPT_PAIRING,
+                        data.get(CONF_ATTEMPT_PAIRING, False),
+                    ),
                 ): bool,
             }
         )

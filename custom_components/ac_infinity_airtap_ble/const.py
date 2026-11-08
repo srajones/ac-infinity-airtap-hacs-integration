@@ -3,7 +3,7 @@ from __future__ import annotations
 from bleak.exc import BleakError
 
 DOMAIN = "ac_infinity_airtap_ble"
-VERSION = "2.2.0-fix.6"
+VERSION = "2.2.0-fix.7"
 
 # Domain used up to 1.x. It collided with dalinicus/homeassistant-acinfinity,
 # so 2.0.0 moved to the name above. Entries created by 1.x are still in
@@ -75,4 +75,22 @@ DEFAULT_SCAN_INTERVAL = 15
 CONF_PASSIVE_ONLY = "passive_only"
 CONF_ATTEMPT_PAIRING = "attempt_pairing"
 AC_INFINITY_SERVICE_UUID = "70d51000-2c7f-4e75-ae8a-d758951ce4e0"
+
+
+def is_passive_mode(entry: object, device: object) -> bool:
+    """Return True when the entry is operating in passive broadcast mode."""
+    options = getattr(entry, "options", None) or {}
+    data = getattr(entry, "data", None) or {}
+    if options.get(CONF_PASSIVE_ONLY, data.get(CONF_PASSIVE_ONLY, False)):
+        return True
+    state = getattr(device, "state", None)
+    if (
+        state is not None
+        and getattr(state, "type", None) == 6
+        and not data.get("protocol_variant")
+        and getattr(state, "work_type", None) is None
+    ):
+        return True
+    return False
+
 

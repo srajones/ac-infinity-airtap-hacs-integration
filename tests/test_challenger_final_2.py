@@ -38,8 +38,8 @@ def flow_module(monkeypatch):
             pass
 
     class OptionsFlow:
-        def __init__(self, config_entry=None):
-            self.config_entry = config_entry
+        def __init__(self):
+            pass
 
         def async_show_form(self, **kwargs):
             return kwargs

@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import slugify
 
-from .const import DOMAIN, MANUFACTURER, get_device_model_name
+from .const import DOMAIN, MANUFACTURER, get_device_model_name, is_passive_mode
 from .coordinator import (ACInfinityDataUpdateCoordinator,
                           ActiveBluetoothCoordinatorEntity)
 from .device import BRIGHTNESS_LEVEL_TO_BYTE, ACInfinityDevice
@@ -29,6 +29,8 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     data: ACInfinityData = hass.data[DOMAIN][entry.entry_id]
+    if is_passive_mode(entry, data.device):
+        return
     async_add_entities(
         [
             ACInfinityDisplayBrightness(data.coordinator, data.device, "Display Brightness"),
@@ -121,6 +123,8 @@ class ACInfinityTemperatureUnit(ACInfinityDisplayBrightness):
     @callback
     def _update_attrs(self) -> None:
         unit = self._device.state.unit_celsius
+        if unit is None and getattr(self._device.state, "is_degree", None) is not None:
+            unit = bool(self._device.state.is_degree)
         if unit is None:
             self._attr_current_option = None
         else:
@@ -197,6 +201,12 @@ class ACInfinityModeSelect(
             self._attr_current_option = MODE_ON
         elif mode == 3:
             self._attr_current_option = MODE_AUTO
+        elif getattr(self._device.state, "current_speed", None) is not None:
+            self._attr_current_option = (
+                MODE_ON if self._device.state.current_speed > 0 else MODE_OFF
+            )
+        elif getattr(self._device.state, "fan", None) is not None:
+            self._attr_current_option = MODE_ON if self._device.state.fan > 0 else MODE_OFF
         else:
             self._attr_current_option = None
 

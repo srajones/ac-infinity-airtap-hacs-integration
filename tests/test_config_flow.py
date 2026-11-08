@@ -30,8 +30,8 @@ def flow_module(monkeypatch):
             pass
 
     class OptionsFlow:
-        def __init__(self, config_entry=None):
-            self.config_entry = config_entry
+        def __init__(self):
+            pass
 
         def async_show_form(self, **kwargs):
             return kwargs
@@ -767,3 +767,58 @@ async def test_options_flow_toggles_attempt_pairing_and_live_updates_device(flow
     result = await handler.async_step_init({CONF_ATTEMPT_PAIRING: True, CONF_PASSIVE_ONLY: False, "scan_interval": 15})
     assert result["data"][CONF_ATTEMPT_PAIRING] is True
     assert mock_device.attempt_pairing is True
+
+
+@pytest.mark.asyncio
+async def test_options_flow_handles_readonly_config_entry_property(flow_module, monkeypatch):
+    """Ensure ACInfinityOptionsFlowHandler works when HA OptionsFlow.config_entry is a read-only property."""
+    entry = SimpleNamespace(
+        options={"scan_interval": 25, "passive_only": True, "attempt_pairing": False},
+        data={},
+        entry_id="ro_entry_id",
+    )
+    monkeypatch.setattr(
+        flow_module.OptionsFlow,
+        "config_entry",
+        property(lambda self: entry),
+        raising=False,
+    )
+    handler = flow_module.ConfigFlow.async_get_options_flow(entry)
+    form = await handler.async_step_init()
+    assert form["step_id"] == "init"
+    validated = form["data_schema"]({})
+    assert validated["scan_interval"] == 25
+    assert validated["passive_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_step_updates_options_and_reloads(flow_module):
+    """Test async_step_reconfigure shows form and updates options cleanly."""
+    entry = SimpleNamespace(
+        entry_id="reconf_entry_1",
+        data={"address": "A4:C1:38:F6:48:F6"},
+        options={"scan_interval": 15, "passive_only": False, "attempt_pairing": False},
+    )
+    mock_device = SimpleNamespace(attempt_pairing=False)
+    flow = make_flow(flow_module)
+    flow.context = {"entry_id": "reconf_entry_1"}
+    flow.hass = SimpleNamespace(
+        data={"ac_infinity_airtap_ble": {"reconf_entry_1": SimpleNamespace(device=mock_device)}},
+        config_entries=SimpleNamespace(
+            async_get_entry=lambda eid: entry if eid == "reconf_entry_1" else None,
+            async_update_entry=MagicMock(),
+            async_reload=AsyncMock(),
+        ),
+    )
+
+    form = await flow.async_step_reconfigure()
+    assert form["step_id"] == "reconfigure"
+
+    result = await flow.async_step_reconfigure(
+        {"scan_interval": 30, "passive_only": True, "attempt_pairing": True}
+    )
+    assert result["reason"] == "reconfigure_successful"
+    assert mock_device.attempt_pairing is True
+    flow.hass.config_entries.async_update_entry.assert_called_once()
+    flow.hass.config_entries.async_reload.assert_awaited_once_with("reconf_entry_1")
+

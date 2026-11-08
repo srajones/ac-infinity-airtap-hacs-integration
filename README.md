@@ -2,17 +2,23 @@
 
 # AC Infinity AirTap HACS Integration
 
-Version **2.2.0-fix.6**, on `main` only. Realigned against decompiled official AC Infinity Android app v2.1.2 protocol logic and synthesized trace analysis for the AirTap T6 (`A4:C1:38:F6:48:F6`).
+Version **2.2.0-fix.7**, on `main` only. Realigned against decompiled official AC Infinity Android app v2.1.2 protocol logic and synthesized trace analysis for the AirTap T6 (`A4:C1:38:F6:48:F6`).
 
 ## Install / update in HACS
 
 1. Back up HA. Remove the downloaded original `ljmerza/ac-infinity-airtap-ble` repository/files from HACS if still present. Both builds use **the same domain/folder `ac_infinity_airtap_ble`**: replace, do not install alongside. Existing HA config entries need not be deleted just to update.
 2. HACS → ⋮ → **Custom repositories** → URL `https://github.com/srajones/ac-infinity-airtap-hacs-integration`, category **Integration**.
-3. Open this fork → **Redownload → main** (or select release `2.2.0-fix.6`), restart HA, and check its manifest reads `2.2.0-fix.6`.
+3. Open this fork → **Redownload → main** (or select release `2.2.0-fix.7`), restart HA, and check its manifest reads `2.2.0-fix.7`.
 4. Confirm HA's configured timezone is correct (David: **America/Detroit**). Fully close the AC Infinity phone app so it does not compete for the BLE connection.
 5. Settings → Devices & services → Add integration → **AC Infinity AirTap HACS Integration** → `D-8DAQJ` / `A4:C1:38:F6:48:F6`, or retry/reload the existing entry.
 
 The patched protocol library is bundled; no manual pip installation is needed.
+
+## What fix.7 changes
+
+- **Fixes `Configure` (`500 Internal Server Error`) & Adds `Reconfigure` Support**: Fixed `ACInfinityOptionsFlowHandler.__init__` calling `super().__init__()` with 0 arguments and safely reading `config_entry` on Python 3.14 / modern Home Assistant, and added `async_step_reconfigure`.
+- **Fixes Sensor Names & Diagnostic Revisions**: Fixed `ACInfinitySensor` setting `_attr_name = name` so `Operating Mode`, `On Speed`, `Protocol Version`, `Firmware Revision` (`SDK_3.4.2`), `Software Revision` (`2.2.14`), and `Hardware Revision` (`2.0`) show their proper names and values instead of `SephsVentUpstairs: Unknown`.
+- **Removes Bogus AirTap `Humidity` / `Atmospheric pressure` & Blank Passive Controls**: Suppresses `0.0%` humidity and `0.00 inHg` VPD sensors on AirTap vents (`type 6` / `type 48`), skips unpopulated active-only controls in passive mode, and automatically cleans up stale entity registry entries on startup.
 
 ## What fix.6 changes
 

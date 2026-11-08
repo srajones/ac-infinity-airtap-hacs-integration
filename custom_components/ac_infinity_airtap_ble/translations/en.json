@@ -2,6 +2,7 @@
   "config": {
     "abort": {
       "no_devices_found": "No devices found on the network",
+      "reconfigure_successful": "Reconfiguration was successful.",
       "single_instance_allowed": "Already configured. Only a single configuration possible.",
       "unsupported_model": "The device does not expose a supported AC Infinity notify/write pair, or its advertisement is invalid."
     },
@@ -23,6 +24,15 @@
         "description": "Enter the Bluetooth MAC address of your AC Infinity device (e.g., A4:C1:38:F6:48:F6).",
         "data": {
           "address": "Bluetooth Address (MAC)",
+          "passive_only": "Passive advertisement mode only (no active GATT connections)",
+          "attempt_pairing": "Attempt Bluetooth pairing on connection retry"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure AC Infinity Device",
+        "description": "Update operation modes and polling intervals.",
+        "data": {
+          "scan_interval": "Update interval (seconds)",
           "passive_only": "Passive advertisement mode only (no active GATT connections)",
           "attempt_pairing": "Attempt Bluetooth pairing on connection retry"
         }

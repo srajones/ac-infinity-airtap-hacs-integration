@@ -137,3 +137,75 @@ async def test_sensor_restore_and_none_protection():
     device.state.current_speed = None
     speed_sensor._update_attrs()
     assert speed_sensor.native_value == 6
+
+
+@pytest.mark.asyncio
+async def test_passive_airtap_sensor_names_and_filtering():
+    """Verify AirTap sensors have explicit _attr_name, fallback values, and skip 0.0% humidity/VPD."""
+    from custom_components.ac_infinity_airtap_ble.sensor import (
+        FirmwareRevisionSensor,
+        HardwareRevisionSensor,
+        OnSpeedSensor,
+        ProtocolVersionSensor,
+        SoftwareRevisionSensor,
+        async_setup_entry as sensor_setup_entry,
+    )
+
+    state = DeviceInfoEx(
+        type=6,
+        version=3,
+        name="D-8DAQJ",
+        work_type=None,
+        level_on=None,
+        tmp=17.07,
+        hum=0.0,
+        vpd=0.0,
+        fan=9,
+        current_speed=9,
+    )
+    device = ACInfinityDevice(SimpleNamespace(address="A4:C1:38:F6:48:F6"), state=state)
+    coordinator = SimpleNamespace(
+        data=None,
+        async_add_listener=lambda *args: lambda: None,
+        last_update_success=True,
+    )
+
+    mode_s = OperatingModeSensor(coordinator, device, "Operating Mode")
+    on_speed_s = OnSpeedSensor(coordinator, device, "On Speed")
+    proto_s = ProtocolVersionSensor(coordinator, device, "Protocol Version")
+    fw_s = FirmwareRevisionSensor(coordinator, device, "Firmware Revision")
+    sw_s = SoftwareRevisionSensor(coordinator, device, "Software Revision")
+    hw_s = HardwareRevisionSensor(coordinator, device, "Hardware Revision")
+
+    assert mode_s._attr_name == "Operating Mode"
+    assert mode_s.native_value == "ON"
+    assert on_speed_s._attr_name == "On Speed"
+    assert on_speed_s.native_value == 9
+    assert proto_s._attr_name == "Protocol Version"
+    assert proto_s.native_value == 3
+    assert fw_s._attr_name == "Firmware Revision"
+    assert fw_s.native_value == "SDK_3.4.2"
+    assert sw_s._attr_name == "Software Revision"
+    assert sw_s.native_value == "2.2.14"
+    assert hw_s._attr_name == "Hardware Revision"
+    assert hw_s.native_value == "2.0"
+
+    added = []
+    hass = SimpleNamespace(
+        data={
+            "ac_infinity_airtap_ble": {
+                "entry1": SimpleNamespace(device=device, coordinator=coordinator)
+            }
+        }
+    )
+    entry = SimpleNamespace(entry_id="entry1")
+    await sensor_setup_entry(hass, entry, lambda ents: added.extend(ents))
+    names = [e._attr_name for e in added]
+    assert "Humidity" not in names
+    assert "VPD" not in names
+    assert "Temperature" in names
+    assert "Current Speed" in names
+    assert "Operating Mode" in names
+    assert "On Speed" in names
+    assert "Firmware Revision" in names
+

@@ -68,6 +68,7 @@ class ACInfinityFan(
             sw_version=str(device.state.version),
             connections={(dr.CONNECTION_BLUETOOTH, device.address)},
         )
+        self._update_attrs()
 
     async def async_added_to_hass(self) -> None:
         """Restore the commanded state; nothing reads it back from the vent."""
@@ -127,8 +128,13 @@ class ACInfinityFan(
         """Handle updating _attr values."""
         self._attr_is_on = self._device.is_on
         self._attr_preset_mode = PRESET_AUTO if self._device.is_auto else None
+        speed = (
+            self._device.state.fan
+            if self._device.state.fan is not None
+            else self._device.state.current_speed
+        )
         self._attr_percentage = ranged_value_to_percentage(
-            SPEED_RANGE, self._device.state.fan or 0
+            SPEED_RANGE, speed or 0
         )
 
     @callback

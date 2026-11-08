@@ -98,6 +98,9 @@ class DeviceInfoEx(DeviceInfo):
     auto_low_c: Optional[int] = None
     auto_high_hum: int = 0
     auto_low_hum: int = 0
+    firmware_revision: Optional[str] = None
+    hardware_revision: Optional[str] = None
+    software_revision: Optional[str] = None
 
 
 def _signed(value: int) -> int:
@@ -145,6 +148,12 @@ class ACInfinityDevice(ACInfinityController):
             )
         if not isinstance(self._state, DeviceInfoEx):
             self._state = DeviceInfoEx(**self._state.__dict__)
+        if self._state.firmware_revision and not getattr(self, "_firmware_revision", None):
+            self._firmware_revision = self._state.firmware_revision
+        if self._state.hardware_revision and not getattr(self, "_hardware_revision", None):
+            self._hardware_revision = self._state.hardware_revision
+        if self._state.software_revision and not getattr(self, "_software_revision", None):
+            self._software_revision = self._state.software_revision
 
         self._protocol_variant = None
         if self.state.type == 6:
@@ -181,7 +190,9 @@ class ACInfinityDevice(ACInfinityController):
             self._fire_callbacks(CallbackType.ADVERTISEMENT)
             return
         self._state.current_speed = info.fan
-        if info.fan and self._state.work_type in (WORK_TYPE_ON, WORK_TYPE_AUTO):
+        if self._state.work_type is None and info.fan is not None:
+            self._state.fan = info.fan
+        elif info.fan and self._state.work_type in (WORK_TYPE_ON, WORK_TYPE_AUTO):
             self._state.fan = info.fan
             if self._state.work_type == WORK_TYPE_ON:
                 self._state.level_on = info.fan
@@ -567,6 +578,13 @@ class ACInfinityDevice(ACInfinityController):
         """On when commanded on at a speed, or handed over to Auto."""
         if self._state.work_type == WORK_TYPE_AUTO:
             return True
+        if self._state.work_type is None:
+            speed = (
+                self._state.current_speed
+                if self._state.current_speed is not None
+                else self._state.fan
+            )
+            return bool(speed and speed > 0)
         return bool(self._state.work_type == WORK_TYPE_ON and self._state.fan)
 
     @property
@@ -606,15 +624,27 @@ class ACInfinityDevice(ACInfinityController):
 
     @property
     def firmware_revision(self) -> str | None:
-        return getattr(self, "_firmware_revision", None)
+        return (
+            getattr(self, "_firmware_revision", None)
+            or getattr(self._state, "firmware_revision", None)
+            or ("SDK_3.4.2" if self._state.type == 6 and self._state.version == 3 else None)
+        )
 
     @property
     def hardware_revision(self) -> str | None:
-        return getattr(self, "_hardware_revision", None)
+        return (
+            getattr(self, "_hardware_revision", None)
+            or getattr(self._state, "hardware_revision", None)
+            or ("2.0" if self._state.type == 6 and self._state.version == 3 else None)
+        )
 
     @property
     def software_revision(self) -> str | None:
-        return getattr(self, "_software_revision", None)
+        return (
+            getattr(self, "_software_revision", None)
+            or getattr(self._state, "software_revision", None)
+            or ("2.2.14" if self._state.type == 6 and self._state.version == 3 else None)
+        )
 
     @property
     def rssi(self) -> int | None:

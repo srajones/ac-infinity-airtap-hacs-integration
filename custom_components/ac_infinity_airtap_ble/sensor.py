@@ -52,21 +52,25 @@ async def async_setup_entry(
         ProtocolVersionSensor(coordinator, device, "Protocol Version"),
     ]
 
-    if device.state.type not in (6, 48) or device.state.hum is not None:
-        entities.append(HumiditySensor(coordinator, device, "Humidity"))
+    if device.state.type in (6, 48):
+        if device.state.hum not in (None, 0, 0.0):
+            entities.append(HumiditySensor(coordinator, device, "Humidity"))
+        if device.state.vpd not in (None, 0, 0.0):
+            entities.append(VpdSensor(coordinator, device, "VPD"))
+    else:
+        if device.state.hum is not None:
+            entities.append(HumiditySensor(coordinator, device, "Humidity"))
+        if device.state.vpd is not None or (
+            device.state.version >= 3 and device.state.type in FAMILY_E_MODELS
+        ):
+            entities.append(VpdSensor(coordinator, device, "VPD"))
 
-    if device.state.vpd is not None or (
-        device.state.version >= 3 and device.state.type in FAMILY_E_MODELS
-    ):
-        entities.append(VpdSensor(coordinator, device, "VPD"))
-
-    entities.extend(
-        [
-            FirmwareRevisionSensor(coordinator, device, "Firmware Revision"),
-            SoftwareRevisionSensor(coordinator, device, "Software Revision"),
-            HardwareRevisionSensor(coordinator, device, "Hardware Revision"),
-        ]
-    )
+    if device.firmware_revision is not None:
+        entities.append(FirmwareRevisionSensor(coordinator, device, "Firmware Revision"))
+    if device.software_revision is not None:
+        entities.append(SoftwareRevisionSensor(coordinator, device, "Software Revision"))
+    if device.hardware_revision is not None:
+        entities.append(HardwareRevisionSensor(coordinator, device, "Hardware Revision"))
     async_add_entities(entities)
 
 
@@ -84,6 +88,7 @@ class ACInfinitySensor(
         super().__init__(coordinator)
         self._device = device
         self._name = name
+        self._attr_name = name
         self._attr_unique_id = f"{self._device.address}_{slugify(name)}"
         self._attr_device_info = DeviceInfo(
             name=device.name,
@@ -187,7 +192,14 @@ class OperatingModeSensor(ACInfinitySensor):
     @callback
     def _update_attrs(self) -> None:
         mode_id = self._device.state.work_type
-        self._attr_native_value = get_mode(mode_id) if mode_id is not None else None
+        if mode_id is not None:
+            self._attr_native_value = get_mode(mode_id)
+        elif getattr(self._device.state, "current_speed", None) is not None:
+            self._attr_native_value = "ON" if self._device.state.current_speed > 0 else "OFF"
+        elif getattr(self._device.state, "fan", None) is not None:
+            self._attr_native_value = "ON" if self._device.state.fan > 0 else "OFF"
+        else:
+            self._attr_native_value = None
 
 
 class OnSpeedSensor(ACInfinitySensor):
@@ -198,7 +210,14 @@ class OnSpeedSensor(ACInfinitySensor):
 
     @callback
     def _update_attrs(self) -> None:
-        self._attr_native_value = self._device.state.level_on
+        if self._device.state.level_on is not None:
+            self._attr_native_value = self._device.state.level_on
+        elif getattr(self._device.state, "current_speed", None) is not None:
+            self._attr_native_value = self._device.state.current_speed
+        elif getattr(self._device.state, "fan", None) is not None:
+            self._attr_native_value = self._device.state.fan
+        else:
+            self._attr_native_value = None
 
 
 class SignalStrengthSensor(ACInfinitySensor):

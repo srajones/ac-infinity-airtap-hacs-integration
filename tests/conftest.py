@@ -182,5 +182,17 @@ class ConfigFlow:
         pass
 
 
+class OptionsFlow:
+    def __init__(self) -> None:
+        pass
+
+    def async_show_form(self, **kwargs):
+        return kwargs
+
+    def async_create_entry(self, **kwargs):
+        return kwargs
+
+
 entries.ConfigFlow = ConfigFlow
+entries.OptionsFlow = OptionsFlow
 sys.modules["homeassistant.config_entries"] = entries

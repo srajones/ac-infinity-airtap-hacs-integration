@@ -348,12 +348,12 @@ class ACInfinityController:
                     if not client.is_connected:
                         raise BLEStepError("pairing", "connect_failed", "Device disconnected during pairing attempt")
 
-                step, code = "mtu negotiation", "connect_failed"
-                await self._negotiate_mtu(client)
-
                 step, code = "service discovery", "service_failed"
                 if not self._resolve_characteristics(client.services):
                     raise BLEStepError(step, "unsupported_model", "No supported notify/write characteristic pair")
+
+                step, code = "mtu negotiation", "connect_failed"
+                await self._negotiate_mtu(client)
                 if self._setup_diagnostics:
                     self._log_connection_context(client)
                     await self._read_device_information(client)
@@ -608,10 +608,16 @@ class ACInfinityController:
                     str_val = val.decode("utf-8", errors="replace").strip("\x00")
                     if label == "firmware_revision":
                         self._firmware_revision = str_val
+                        if hasattr(self._state, "firmware_revision"):
+                            self._state.firmware_revision = str_val
                     elif label == "hardware_revision":
                         self._hardware_revision = str_val
+                        if hasattr(self._state, "hardware_revision"):
+                            self._state.hardware_revision = str_val
                     elif label == "software_revision":
                         self._software_revision = str_val
+                        if hasattr(self._state, "software_revision"):
+                            self._state.software_revision = str_val
                 except Exception:
                     pass
             if not client.is_connected:
