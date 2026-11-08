@@ -439,6 +439,7 @@ class ACInfinityController:
 
     async def _negotiate_mtu(self, client) -> int:
         """Negotiate ATT MTU 247 where supported by client/backend; handle MTU constraints gracefully."""
+        backend = getattr(client, "_backend", None)
         if hasattr(client, "request_mtu"):
             try:
                 res = client.request_mtu(TARGET_MTU)
@@ -446,13 +447,20 @@ class ACInfinityController:
                     await res
             except Exception as err:
                 _LOGGER.debug("%s: client.request_mtu(%d) failed: %s", self.name, TARGET_MTU, err)
-        elif hasattr(getattr(client, "_backend", None), "request_mtu"):
+        elif hasattr(backend, "request_mtu"):
             try:
-                res = client._backend.request_mtu(TARGET_MTU)
+                res = backend.request_mtu(TARGET_MTU)
                 if asyncio.iscoroutine(res):
                     await res
             except Exception as err:
                 _LOGGER.debug("%s: backend request_mtu(%d) failed: %s", self.name, TARGET_MTU, err)
+        if hasattr(backend, "_acquire_mtu"):
+            try:
+                res = backend._acquire_mtu()
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception as err:
+                _LOGGER.debug("%s: backend _acquire_mtu() failed: %s", self.name, err)
         mtu = getattr(client, "mtu_size", DEFAULT_MTU)
         try:
             if callable(mtu):
@@ -904,8 +912,12 @@ class ACInfinityController:
                 if isinstance(char_max_write, (int, float)) and char_max_write >= 20:
                     max_pdu = max(max_pdu, int(char_max_write))
 
-                is_retry = getattr(self, "_connect_attempt", 0) >= 1
-                should_split = len(command) > max_pdu or (is_clock and is_retry)
+                connect_attempt = getattr(self, "_connect_attempt", 0)
+                is_retry = connect_attempt >= 1
+                if is_clock and max_pdu < 21 and connect_attempt == 2:
+                    should_split = False
+                else:
+                    should_split = len(command) > max_pdu or (is_clock and is_retry)
                 chunk_size = min(max_pdu, 20) if should_split else len(command)
 
                 chunks = [command[i:i + chunk_size] for i in range(0, len(command), chunk_size)]
