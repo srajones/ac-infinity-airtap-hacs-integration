@@ -82,6 +82,7 @@ class ACInfinityController:
         self.last_command_success = True
         self._failure_streak = False
         self._setup_diagnostics = False
+        self._diagnostic_read_label: str | None = None
         self._device_information_attempted = False
         self._diagnostic_warning = False
         self._cccd_warning = False
@@ -300,6 +301,20 @@ class ACInfinityController:
                 if self._setup_diagnostics:
                     await self._log_subscription_state(client, "after_subscribe")
                     await self._read_device_information(client)
+                if self._state.type == 6:
+                    # Android 2.1.2 BleController.connect -> v3 uses a 1500ms
+                    # post-subscribe/revision delay for isTelinkChip(type),
+                    # which explicitly includes AirTap type 6. A GATT ACK does
+                    # not mean this chip is ready to interpret control frames.
+                    step, code = "Telink readiness", "connect_failed"
+                    _LOGGER.debug("%s: BLE Telink readiness wait start: type=6 delay=1.5s "
+                                  "after subscribe/revision reads (Android 2.1.2)", self.name)
+                    started = self.loop.time()
+                    await asyncio.sleep(1.5)
+                    if self._client is not client or not client.is_connected:
+                        raise BLEStepError(step, code, "Device disconnected during Telink settle delay")
+                    _LOGGER.debug("%s: BLE Telink readiness wait completed elapsed=%.3fs; "
+                                  "control writes may begin", self.name, self.loop.time() - started)
                 self._reset_disconnect_timer()
             except BaseException as err:
                 if self._disconnect_timer:
@@ -350,6 +365,8 @@ class ACInfinityController:
         if "read" not in characteristic.properties:
             _LOGGER.debug("%s: BLE diagnostic %s skipped: no read property", self.name, label)
             return None
+        previous_label = self._diagnostic_read_label
+        self._diagnostic_read_label = label
         try:
             async with asyncio.timeout(DIAGNOSTIC_TIMEOUT):
                 value = bytes(await client.read_gatt_char(characteristic))
@@ -360,6 +377,8 @@ class ACInfinityController:
         except (BleakError, TimeoutError, OSError, EOFError, NotImplementedError, AttributeError) as err:
             self._log_diagnostic_failure(label, err)
             return None
+        finally:
+            self._diagnostic_read_label = previous_label
 
     async def _read_device_information(self, client) -> None:
         """Mirror the app's documented revision READS; do not subscribe to revision indications."""
@@ -428,6 +447,7 @@ class ACInfinityController:
         packet.clear()
         if (len(frame) != length or bytes(crc16(frame, 8, length - 10)) != frame[-2:]
                 or int.from_bytes(frame[4:6], "big") != self._pending_sequence
+                or frame[8] != 0
                 or frame[9] not in ({3, 0x66} if self._pending_command == 3 else {self._pending_command})):
             _LOGGER.debug("%s: Ignoring unmatched/invalid response: %s", self.name, frame.hex())
             return True
@@ -500,12 +520,13 @@ class ACInfinityController:
                     await client.stop_notify(read_char)
             except Exception as err:
                 self._record_failure(BLEStepError("unsubscribe", "disconnect_failed", repr(err)))
-        if client.is_connected:
-            try:
-                async with asyncio.timeout(DISCONNECT_TIMEOUT):
-                    await client.disconnect()
-            except Exception as err:
-                self._record_failure(BLEStepError("disconnect", "disconnect_failed", repr(err)))
+        # Bleak disconnect is idempotent and also releases backend resources
+        # after an unexpected link loss; do not skip it on is_connected=False.
+        try:
+            async with asyncio.timeout(DISCONNECT_TIMEOUT):
+                await client.disconnect()
+        except Exception as err:
+            self._record_failure(BLEStepError("disconnect", "disconnect_failed", repr(err)))
 
     async def _execute_disconnect(self) -> None:
         async with self._connect_lock:
@@ -590,7 +611,7 @@ class ACInfinityController:
             raise BLEStepError("write", "service_failed", "Missing active GATT pair")
         # Diagnostics must finish before registering a pending request: a stored
         # value or unsolicited notification during that read is not a query reply.
-        if self._setup_diagnostics and command[9] == 1:
+        if self._setup_diagnostics and command[9] == 1 and self._state.type != 6:
             await self._read_diagnostic_characteristic(
                 self._client, self._read_char, "control_reply_before_query")
             if self._client is None or not self._client.is_connected:
@@ -627,8 +648,9 @@ class ACInfinityController:
                     and self._client is not None and self._client.is_connected
                     and self._read_char is not None):
                 await self._log_subscription_state(self._client, "response_timeout")
-                await self._read_diagnostic_characteristic(
-                    self._client, self._read_char, "control_reply_after_timeout_not_accepted_as_live")
+                if self._state.type != 6:
+                    await self._read_diagnostic_characteristic(
+                        self._client, self._read_char, "control_reply_after_timeout_not_accepted_as_live")
             if error is err:
                 raise
             raise error from err

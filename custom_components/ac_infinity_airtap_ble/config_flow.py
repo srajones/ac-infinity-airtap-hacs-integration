@@ -102,6 +102,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     data={
                         CONF_ADDRESS: discovery_info.address,
                         CONF_SERVICE_DATA: dataclasses.asdict(controller.state),
+                        "protocol_variant": controller.protocol_variant,
                     },
                 )
 
@@ -191,6 +192,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data={
                             CONF_ADDRESS: address,
                             CONF_SERVICE_DATA: dataclasses.asdict(controller.state),
+                            "protocol_variant": controller.protocol_variant,
                         },
                     )
 

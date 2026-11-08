@@ -51,15 +51,21 @@ def make_flow(module):
 
 
 @pytest.mark.asyncio
-async def test_discovery_saves_queried_state_as_json_not_advertisement_dataclass(flow_module, monkeypatch):
+@pytest.mark.parametrize("manual", [False, True])
+async def test_discovery_saves_queried_state_as_json_not_advertisement_dataclass(flow_module, monkeypatch, manual):
     flow = make_flow(flow_module)
-    discovery = SimpleNamespace(address="A4:C1:38:F6:48:F6", device=object(), advertisement=object())
+    discovery = SimpleNamespace(address="A4:C1:38:F6:48:F6", device=SimpleNamespace(name="vent"), advertisement=object())
     flow._discovered_devices[discovery.address] = discovery
     state = DeviceInfoEx(type=6, version=3, name="D-8DAQJ", work_type=2, level_on=5, level_off=0)
-    controller = SimpleNamespace(state=state, name=state.name, update=AsyncMock(), stop=AsyncMock())
+    controller = SimpleNamespace(state=state, name=state.name, protocol_variant="android_2_1_2_telink", update=AsyncMock(), stop=AsyncMock())
     monkeypatch.setattr(flow_module, "ACInfinityDevice", lambda *args, **kwargs: controller)
-    entry = await flow.async_step_user({"address": discovery.address})
+    if manual:
+        monkeypatch.setattr(flow_module, "async_ble_device_from_address", lambda *args: discovery.device)
+        entry = await flow.async_step_manual({"address": discovery.address})
+    else:
+        entry = await flow.async_step_user({"address": discovery.address})
     assert entry["data"]["service_data"]["level_on"] == 5
+    assert entry["data"]["protocol_variant"] == "android_2_1_2_telink"
     json.dumps(entry["data"])
     controller.stop.assert_awaited_once()
 

@@ -118,6 +118,7 @@ async def test_timeout_readback_is_diagnostic_only_and_cannot_fake_setup_success
     monkeypatch.setattr(transport, "RESPONSE_TIMEOUT", 0.001)
     caplog.set_level("DEBUG")
     dev = controller()
+    dev.state.type = 48  # Type 6 no longer performs control-value READ snapshots.
     dev._setup_diagnostics = True
     dev._read_char = char(CONTROL, ["read", "notify"])
     dev._write_char = char("70d51001-2c7f-4e75-ae8a-d758951ce4e0", ["read", "write"])
@@ -160,6 +161,7 @@ async def test_pre_query_read_cannot_complete_a_not_yet_written_query(monkeypatc
     from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble.exceptions import BLEStepError
     monkeypatch.setattr(transport, "RESPONSE_TIMEOUT", 0.001)
     dev = controller()
+    dev.state.type = 48  # Type 6 no longer performs control-value READ snapshots.
     dev._setup_diagnostics = True
     dev._read_char = char(CONTROL, ["read", "notify"])
     dev._write_char = char("70d51001-2c7f-4e75-ae8a-d758951ce4e0", ["read", "write"])
@@ -187,6 +189,7 @@ async def test_disabled_cccd_warning_is_not_spammed_during_retries(caplog):
 async def test_disconnect_during_baseline_read_never_attempts_command_write():
     from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble.exceptions import BLEStepError
     dev = controller()
+    dev.state.type = 48  # Type 6 no longer performs control-value READ snapshots.
     dev._setup_diagnostics = True
     dev._read_char = char(CONTROL, ["read", "notify"])
     dev._write_char = char("70d51001-2c7f-4e75-ae8a-d758951ce4e0", ["read", "write"])

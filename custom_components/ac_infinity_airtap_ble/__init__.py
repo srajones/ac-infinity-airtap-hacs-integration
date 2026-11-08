@@ -46,7 +46,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             f"Unexpected config entry service data type: {type(service_data)}"
         )
 
-    device = ACInfinityDevice(ble_device, device_info)
+    device = ACInfinityDevice(ble_device, device_info,
+                              protocol_variant=entry.data.get("protocol_variant"))
     coordinator = ACInfinityDataUpdateCoordinator(hass, _LOGGER, ble_device, device)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = ACInfinityData(

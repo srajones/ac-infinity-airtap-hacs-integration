@@ -93,7 +93,7 @@ async def test_setup_requires_readable_mode_and_speeds_and_always_disconnects(mo
     dev._read_keys = AsyncMock(return_value={0x10: b"\x02", 0x11: b"\x00", 0x12: b"\x05"})
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
     await dev.update()
-    dev._read_keys.assert_awaited_once_with([0x10, 0x11, 0x12])
+    dev._read_keys.assert_awaited_once_with([0x10, 0x02, 0x03, 0x20])
     assert (dev.state.work_type, dev.state.level_on, dev.state.fan) == (2, 5, 5)
     dev._execute_disconnect.assert_awaited_once()
 

@@ -58,6 +58,12 @@ READ_BACK_KEYS = (
     [0x20, 0x21, 0x22, 0x24, 0x11, 0x12, 0x13],
 )
 
+# Protocol facts from David's official Android 2.1.2 APK. No app source is
+# bundled: type 6 uses legacy command-01 GETs, A5 00 and CCITT-FALSE.
+APP_LEGACY_PROFILE = "android_2_1_2_telink"
+APP_MODEL_KEYS = [0x10, 0x02, 0x03, 0x20]
+APP_SPEED_KEYS = [0x11, 0x12]
+
 _LOGGER = logging.getLogger(ACInfinityController.__module__)
 
 
@@ -120,6 +126,7 @@ class ACInfinityDevice(ACInfinityController):
         ble_device: BLEDevice,
         state: DeviceInfoEx | None = None,
         advertisement_data: AdvertisementData | None = None,
+        protocol_variant: str | None = None,
     ):
         super().__init__(
             ble_device=ble_device,
@@ -133,6 +140,17 @@ class ACInfinityDevice(ACInfinityController):
         if not isinstance(self._state, DeviceInfoEx):
             self._state = DeviceInfoEx(**self._state.__dict__)
 
+        self._protocol_variant = None
+        if self.state.type == 6:
+            # App BleStatue starts at -1; next allocated request sequence is 0.
+            self._sequence = -1
+        if protocol_variant == APP_LEGACY_PROFILE and self.state.type == 6:
+            self._protocol_variant = protocol_variant
+            _LOGGER.debug("%s: BLE restored app protocol profile=%s initial_sequence=0",
+                          self.name, protocol_variant)
+        elif protocol_variant is not None:
+            _LOGGER.warning("%s: Ignoring unrecognized/inapplicable saved protocol variant=%r",
+                            self.name, protocol_variant)
         self._command_lock = asyncio.Lock()
         self._commands_in_line = 0
         self._newest_command: dict[int, object] = {}
@@ -174,7 +192,8 @@ class ACInfinityDevice(ACInfinityController):
         type-48 layout is mapped from a live capture, commanded on/off/speed
         state stays authoritative rather than being clobbered by these frames.
         """
-        _LOGGER.debug("%s: BLE RX sender=%s bytes=%s", self.name, _sender, data.hex())
+        _LOGGER.debug("%s: BLE RX sender=%s bytes=%s diagnostic_read=%s",
+                      self.name, _sender, data.hex(), self._diagnostic_read_label)
         # Status pushes arrive about once a second, so only a command reply (A5) may
         # resolve the future, or a read could get a status frame back instead.
         if self._accept_command_notification(data):
@@ -286,7 +305,10 @@ class ACInfinityDevice(ACInfinityController):
         False instead of raising.
         """
         try:
-            for keys in READ_BACK_KEYS:
+            groups = READ_BACK_KEYS
+            if self.state.type == 6:
+                groups = (APP_MODEL_KEYS, READ_BACK_KEYS[1])
+            for keys in groups:
                 values = await self._read_keys(keys)
                 _LOGGER.debug(
                     "%s: Read back %s: %s",
@@ -580,11 +602,31 @@ class ACInfinityDevice(ACInfinityController):
             self._state.level_on = speed
         self._state.fan = (speed or self._state.level_on or 10) if is_on else 0
 
+    @property
+    def protocol_variant(self) -> str | None:
+        """JSON-safe profile; exposed only after full mode/speed validation."""
+        return self._protocol_variant
+
     async def update(self) -> None:
-        """Validate setup using only the AirTap's mode and speed keys."""
+        """Validate the app's legacy GETs; never emit sync/setting/OTA writes."""
         self._setup_diagnostics = True
         try:
-            values = await self._read_keys([0x10, 0x11, 0x12])
+            candidate = None
+            if self.state.type == 6:
+                _LOGGER.debug("%s: BLE app protocol profile=%s header=a500 command=01 "
+                              "keys=10020320; no speculative fallback or clock/setting writes; "
+                              "control READ snapshots disabled (BlueZ Value callbacks can be read-induced)",
+                              self.name, APP_LEGACY_PROFILE)
+                values = await self._read_keys(APP_MODEL_KEYS)
+                if len(values.get(0x10, b"")) != 1 or values[0x10][0] not in (1, 2, 3):
+                    raise BLEStepError("setup validation", "invalid_response",
+                                       "App model query has no valid AirTap mode TLV")
+                if any(key not in values for key in APP_SPEED_KEYS):
+                    _LOGGER.debug("%s: BLE app follow-up query off/on speed keys=1112", self.name)
+                    values.update(await self._read_keys(APP_SPEED_KEYS))
+                candidate = APP_LEGACY_PROFILE
+            else:
+                values = await self._read_keys([0x10, 0x11, 0x12])
             if (any(len(values.get(key, b"")) != 1 for key in (0x10, 0x11, 0x12))
                     or values[0x10][0] not in (1, 2, 3)
                     or any(values[key][0] > 10 for key in (0x11, 0x12))):
@@ -593,12 +635,21 @@ class ACInfinityDevice(ACInfinityController):
                 self._record_failure(error)
                 raise error
             self._apply_read_back(values)
+            self._protocol_variant = candidate
+            self._record_success()
             self._fire_callbacks(CallbackType.UPDATE_RESPONSE)
+            _LOGGER.debug("%s: BLE protocol variant validated and selected for config entry: %s",
+                          self.name, self.protocol_variant)
             _LOGGER.debug("%s: BLE setup validated: type=%s version=%s values=%s",
                           self.name, self.state.type, self.state.version,
                           {hex(k): v.hex() for k, v in values.items()})
             # Optional unsolicited temperature frames do not stand in for a query reply.
             await asyncio.sleep(4)
+        except BLEStepError as err:
+            self._record_failure(err)
+            _LOGGER.debug("%s: BLE setup failed at %s code=%s", self.name, err.step, err.code,
+                          exc_info=True)
+            raise
         finally:
             self._setup_diagnostics = False
             await self._execute_disconnect()

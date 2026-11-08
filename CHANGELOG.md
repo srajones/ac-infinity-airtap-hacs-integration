@@ -1,3 +1,12 @@
+## 2.2.0-fix.3 — Official APK Telink startup compatibility
+
+- Analyze David's supplied official Android 2.1.2 app locally. Its connect pipeline explicitly waits 1500ms for Telink types including AirTap type 6. Add that wait after subscription/revision reads on every new type-6 setup/runtime connection, and detect/clean up link loss or cancellation during it. Previous hardware attempts wrote after only 91–178ms.
+- Use the app's exact legacy model GET (`10 02 03 20`) and separate off/on-speed GET (`11 12`); initialize the per-controller sequence at 0. Keep APK-confirmed A5 00 requests, command 01 and existing CCITT-FALSE CRCs. No speculative fallback/probe variants: the APK shows one applicable wire format.
+- Retain strict setup validation and save/restore the single app profile in config data. Reuse its model query during runtime readback. Do not send the app's command-03 clock sync because setup must remain read-only.
+- Disable control-reply READ snapshots during type-6 setup to prevent BlueZ read-induced Value callbacks/stale values being confused with notifications. Retain revision/PnP/CCCD diagnostics and annotate diagnostic-read callbacks.
+- Match the full reply command word as well as framing/CRC/sequence. Retain specific errors, warning-once streaks, tracebacks, bounded read retries and finally cleanup, including backend disconnect after an already-lost link.
+- Hardware-unverified: the missing wait is a confirmed app mismatch and plausible cause, not proof of a successful T6 fix. No APK/app code/assets, OTA/security changes, setting probes, GitHub release or tag.
+
 ## 2.2.0-fix.2 — Read-only diagnosis after the first hardware test
 
 - Hardware test of fix.1 confirmed acknowledged writes still receive zero notifications; do not present that theory as the root cause.
