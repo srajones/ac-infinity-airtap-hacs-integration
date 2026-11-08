@@ -2,23 +2,49 @@
 
 # AC Infinity AirTap HACS Integration
 
-Version **2.2.0-fix.7**, on `main` only. Realigned against decompiled official AC Infinity Android app v2.1.2 protocol logic and synthesized trace analysis for the AirTap T6 (`A4:C1:38:F6:48:F6`).
+## 🏠 Option 1: Install in Home Assistant via HACS (Recommended)
 
-## Install / update in HACS
+> **100% Standalone Native HACS Architecture (Zero Cloud or External Dependencies Required):** The `v2.2.0-fix.8` Home Assistant HACS integration runs completely locally inside Home Assistant (`custom_components/ac_infinity_airtap_ble/`) with **zero vendor cloud, account, or external pip package dependencies** (the patched `ac_infinity_ble` protocol library is bundled directly inside `vendor/`). It features an **Automatic Advertisement-Backed Passive Mode** for rock-solid real-time AirTap T4/T6 temperature, speed, operating mode, and diagnostic telemetry (even across restricted MTU 23 Bluetooth proxies or Telink TLSR8266 `SDK_3.4.2` firmware), alongside full **Active GATT Control Mode** (`20+1` clock sync chunking, fan speed, Auto high/low temperature triggers, transition, display brightness, and temperature calibration).
 
-1. Back up HA. Remove the downloaded original `ljmerza/ac-infinity-airtap-ble` repository/files from HACS if still present. Both builds use **the same domain/folder `ac_infinity_airtap_ble`**: replace, do not install alongside. Existing HA config entries need not be deleted just to update.
-2. HACS → ⋮ → **Custom repositories** → URL `https://github.com/srajones/ac-infinity-airtap-hacs-integration`, category **Integration**.
-3. Open this fork → **Redownload → main** (or select release `2.2.0-fix.7`), restart HA, and check its manifest reads `2.2.0-fix.7`.
-4. Confirm HA's configured timezone is correct (David: **America/Detroit**). Fully close the AC Infinity phone app so it does not compete for the BLE connection.
-5. Settings → Devices & services → Add integration → **AC Infinity AirTap HACS Integration** → `D-8DAQJ` / `A4:C1:38:F6:48:F6`, or retry/reload the existing entry.
+### Step 1 — Add to HACS & Download
 
-The patched protocol library is bundled; no manual pip installation is needed.
+Click the button below to open this repository directly in HACS, or follow the manual steps underneath:
 
-## What fix.7 changes
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=srajones&repository=ac-infinity-airtap-hacs-integration&category=integration)
 
-- **Fixes `Configure` (`500 Internal Server Error`) & Adds `Reconfigure` Support**: Fixed `ACInfinityOptionsFlowHandler.__init__` calling `super().__init__()` with 0 arguments and safely reading `config_entry` on Python 3.14 / modern Home Assistant, and added `async_step_reconfigure`.
-- **Fixes Sensor Names & Diagnostic Revisions**: Fixed `ACInfinitySensor` setting `_attr_name = name` so `Operating Mode`, `On Speed`, `Protocol Version`, `Firmware Revision` (`SDK_3.4.2`), `Software Revision` (`2.2.14`), and `Hardware Revision` (`2.0`) show their proper names and values instead of `SephsVentUpstairs: Unknown`.
-- **Removes Bogus AirTap `Humidity` / `Atmospheric pressure` & Blank Passive Controls**: Suppresses `0.0%` humidity and `0.00 inHg` VPD sensors on AirTap vents (`type 6` / `type 48`), skips unpopulated active-only controls in passive mode, and automatically cleans up stale entity registry entries on startup.
+**Manual HACS steps:**
+
+1. Open Home Assistant and go to **HACS → Integrations**.
+2. Click the **⋮** menu in the top-right corner and select **Custom repositories**.
+3. Enter the repository URL:
+   ```text
+   https://github.com/srajones/ac-infinity-airtap-hacs-integration
+   ```
+4. Select **Integration** as the category and click **Add**.
+5. Find **AC Infinity AirTap HACS Integration** in the HACS list, click **Download**, and confirm version `v2.2.0-fix.8`.
+6. **Restart Home Assistant** (**Settings → System → Restart** or **Developer Tools → Restart**).
+
+### Step 2 — Add the Integration in Home Assistant
+
+1. In Home Assistant, go to **Settings → Devices & Services**.
+2. Your AirTap vent (e.g. `BLE_FAN` / `D-8DAQJ`) will either appear automatically under **Discovered**, or you can click **+ Add Integration** (bottom right) and search for **AC Infinity AirTap HACS Integration** (`ac_infinity_airtap_ble`).
+3. Fill in the setup form:
+   - **Device / Bluetooth MAC Address**: Select your discovered AirTap register booster fan from the dropdown (formatted as `BLE_FAN (A4:C1:38:XX:XX:XX) — Airtap Series`), choose **Add all discovered AC Infinity devices**, or select manual MAC entry.
+   - **Operation Mode & Connection Toggles** *(can also be changed anytime later via **Configure** or **Reconfigure**)*:
+     - **`Passive advertisement mode only (no active GATT connections)`** *(Recommended for 24/7 HVAC & Vent Temperature Monitoring)* — Reads live ambient air temperature, current fan speed, on speed, operating mode, RSSI signal strength, and hardware/firmware/software revisions directly from 0x0902 BLE broadcasts with zero GATT connection overhead, hiding unpopulated active-only controls so your device page stays 100% clean. *(If left unchecked during setup and active GATT validation times out on Telink firmware, the integration automatically falls back to passive mode and checks this box for you.)*
+     - **`Active GATT Mode` (Passive checkbox unchecked)** — Enables full two-way GATT control entities (`Auto High/Low Temperature`, `Auto High/Low Trigger`, `Auto Transition`, `Display`, `Display Brightness`, `Mode`, `Off/On Speed`, `Temperature Calibration`, `Temperature Unit`, and `Refresh Settings`).
+     - **`Attempt Bluetooth pairing on connection retry`** — Optional toggle for BlueZ hosts/proxies that require BLE bonding on connection retry.
+4. **Adjust Settings Anytime**:
+   - Click the gear icon (**Configure**) or **⋮ → Reconfigure** on your **AC Infinity AirTap HACS Integration** entry to change the **Update interval (seconds)** (`5`–`300`, default `15`) or switch between **Passive advertisement mode only** and **Active GATT mode** on the fly—entities are automatically added or cleaned up to match.
+
+---
+
+## What fix.8 & fix.7 change
+
+- **Automatic Passive Mode Sync & Clean Entity Management (`v2.2.0-fix.8`)**: Automatically checks `Passive advertisement mode only` in **Configure** / **Reconfigure** when a device falls back to passive mode during setup, prevents `ACInfinityFan` state restoration from re-enabling active-only controls in passive mode, and populates clean default values for all active controls when active mode is enabled.
+- **Fixes `Configure` (`500 Internal Server Error`) & Adds `Reconfigure` Support (`v2.2.0-fix.7`)**: Fixed `ACInfinityOptionsFlowHandler.__init__` calling `super().__init__()` with 0 arguments and safely reading `config_entry` on Python 3.14 / modern Home Assistant, and added `async_step_reconfigure`.
+- **Fixes Sensor Names & Diagnostic Revisions (`v2.2.0-fix.7`)**: Fixed `ACInfinitySensor` setting `_attr_name = name` so `Operating Mode`, `On Speed`, `Protocol Version`, `Firmware Revision` (`SDK_3.4.2`), `Software Revision` (`2.2.14`), and `Hardware Revision` (`2.0`) show their proper names and values instead of `Unknown`.
+- **Removes Bogus AirTap `Humidity` / `Atmospheric pressure` (`v2.2.0-fix.7`)**: Suppresses `0.0%` humidity and `0.00 inHg` VPD sensors on AirTap vents (`type 6` / `type 48`) and automatically cleans up stale entity registry entries on startup.
 
 ## What fix.6 changes
 
