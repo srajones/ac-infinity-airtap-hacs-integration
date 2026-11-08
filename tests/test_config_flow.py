@@ -822,3 +822,41 @@ async def test_reconfigure_step_updates_options_and_reloads(flow_module):
     flow.hass.config_entries.async_update_entry.assert_called_once()
     flow.hass.config_entries.async_reload.assert_awaited_once_with("reconf_entry_1")
 
+
+@pytest.mark.asyncio
+async def test_options_flow_and_reconfigure_default_passive_true_on_fallback_entry(flow_module):
+    """Ensure Configure and Reconfigure show passive_only checked when entry fell back to passive mode."""
+    entry = SimpleNamespace(
+        entry_id="fallback_entry_1",
+        data={
+            "address": "A4:C1:38:F6:48:F6",
+            "service_data": {"type": 6, "name": "D-8DAQJ", "version": 3, "work_type": None},
+            "protocol_variant": None,
+        },
+        options={"passive_only": False, "attempt_pairing": False},
+    )
+    # Even if ACInfinityFan.restore_fan_state mutated device.state.work_type = 2 in memory:
+    mock_device = SimpleNamespace(
+        state=SimpleNamespace(type=6, work_type=2),
+        protocol_variant=None,
+        attempt_pairing=False,
+    )
+    handler = flow_module.ConfigFlow.async_get_options_flow(entry)
+    handler.hass = SimpleNamespace(
+        data={"ac_infinity_airtap_ble": {"fallback_entry_1": SimpleNamespace(device=mock_device)}}
+    )
+    opt_form = await handler.async_step_init()
+    assert opt_form["data_schema"]({})["passive_only"] is True
+
+    flow = make_flow(flow_module)
+    flow.context = {"entry_id": "fallback_entry_1"}
+    flow.hass = SimpleNamespace(
+        data={"ac_infinity_airtap_ble": {"fallback_entry_1": SimpleNamespace(device=mock_device)}},
+        config_entries=SimpleNamespace(
+            async_get_entry=lambda eid: entry if eid == "fallback_entry_1" else None,
+        ),
+    )
+    reconf_form = await flow.async_step_reconfigure()
+    assert reconf_form["data_schema"]({})["passive_only"] is True
+
+

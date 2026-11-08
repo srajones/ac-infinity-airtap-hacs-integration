@@ -30,6 +30,8 @@ class TemperatureNumberDescription(NumberEntityDescription):
     field: str
     range_f: tuple[int, int]
     range_c: tuple[int, int]
+    default_f: int
+    default_c: int
     to_c: Callable[[int], int]
     to_f: Callable[[int], int]
     setter: Callable[[ACInfinityDevice, int], Awaitable[None]]
@@ -43,6 +45,8 @@ TEMPERATURE_NUMBERS = (
         field="calibration",
         range_f=CALIBRATION_RANGE_F,
         range_c=CALIBRATION_RANGE_C,
+        default_f=0,
+        default_c=0,
         to_c=f_delta_to_c,
         to_f=c_delta_to_f,
         setter=ACInfinityDevice.set_calibration,
@@ -54,6 +58,8 @@ TEMPERATURE_NUMBERS = (
         field="transition",
         range_f=TRANSITION_RANGE_F,
         range_c=TRANSITION_RANGE_C,
+        default_f=2,
+        default_c=1,
         to_c=f_delta_to_c,
         to_f=c_delta_to_f,
         setter=ACInfinityDevice.set_transition,
@@ -65,6 +71,8 @@ TEMPERATURE_NUMBERS = (
         field="auto_high",
         range_f=AUTO_TRIGGER_RANGE_F,
         range_c=AUTO_TRIGGER_RANGE_C,
+        default_f=90,
+        default_c=32,
         to_c=f_to_c,
         to_f=c_to_f,
         setter=ACInfinityDevice.set_auto_high,
@@ -76,6 +84,8 @@ TEMPERATURE_NUMBERS = (
         field="auto_low",
         range_f=AUTO_TRIGGER_RANGE_F,
         range_c=AUTO_TRIGGER_RANGE_C,
+        default_f=50,
+        default_c=10,
         to_c=f_to_c,
         to_f=c_to_f,
         setter=ACInfinityDevice.set_auto_low,
@@ -270,6 +280,11 @@ class ACInfinityTemperatureNumber(ACInfinityNumber):
     @callback
     def _update_attrs(self) -> None:
         unit = "c" if self._celsius else "f"
-        self._attr_native_value = getattr(
-            self._device.state, f"{self.entity_description.field}_{unit}"
-        )
+        val = getattr(self._device.state, f"{self.entity_description.field}_{unit}")
+        if val is None:
+            val = (
+                self.entity_description.default_c
+                if self._celsius
+                else self.entity_description.default_f
+            )
+        self._attr_native_value = val

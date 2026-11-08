@@ -3,7 +3,7 @@ from __future__ import annotations
 from bleak.exc import BleakError
 
 DOMAIN = "ac_infinity_airtap_ble"
-VERSION = "2.2.0-fix.7"
+VERSION = "2.2.0-fix.8"
 
 # Domain used up to 1.x. It collided with dalinicus/homeassistant-acinfinity,
 # so 2.0.0 moved to the name above. Entries created by 1.x are still in
@@ -83,12 +83,25 @@ def is_passive_mode(entry: object, device: object) -> bool:
     data = getattr(entry, "data", None) or {}
     if options.get(CONF_PASSIVE_ONLY, data.get(CONF_PASSIVE_ONLY, False)):
         return True
+    if options.get("_passive_migrated") and CONF_PASSIVE_ONLY in options:
+        return bool(options[CONF_PASSIVE_ONLY])
     state = getattr(device, "state", None)
+    service_data = data.get("service_data")
+    if isinstance(service_data, dict):
+        stored_work_type = service_data.get("work_type")
+        stored_type = service_data.get("type")
+    elif service_data is not None:
+        stored_work_type = getattr(service_data, "work_type", None)
+        stored_type = getattr(service_data, "type", None)
+    else:
+        stored_work_type = getattr(state, "work_type", None)
+        stored_type = None
+    dev_type = getattr(state, "type", None) if state is not None else stored_type
     if (
-        state is not None
-        and getattr(state, "type", None) == 6
+        dev_type == 6
         and not data.get("protocol_variant")
-        and getattr(state, "work_type", None) is None
+        and getattr(device, "protocol_variant", None) is None
+        and stored_work_type is None
     ):
         return True
     return False

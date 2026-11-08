@@ -44,6 +44,7 @@ from .const import (
     DEVICE_MODEL,
     DOMAIN,
     get_device_model_name,
+    is_passive_mode,
 )
 from .device import ACInfinityDevice, DeviceInfoEx
 from .errors import config_error
@@ -546,6 +547,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
                 CONF_PASSIVE_ONLY: user_input.get(CONF_PASSIVE_ONLY, False),
                 CONF_ATTEMPT_PAIRING: user_input.get(CONF_ATTEMPT_PAIRING, False),
+                "_passive_migrated": True,
             }
             hass = getattr(self, "hass", None)
             if entry is not None and hass is not None and hasattr(hass, "config_entries"):
@@ -570,6 +572,23 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
             return self.async_abort(reason="reconfigure_successful")
 
+        device = None
+        hass = getattr(self, "hass", None)
+        if (
+            entry is not None
+            and hass is not None
+            and DOMAIN in getattr(hass, "data", {})
+            and getattr(entry, "entry_id", None) in hass.data[DOMAIN]
+        ):
+            device = getattr(hass.data[DOMAIN][entry.entry_id], "device", None)
+        passive_default = (
+            bool(options.get(CONF_PASSIVE_ONLY, data.get(CONF_PASSIVE_ONLY, False)))
+            if options.get("_passive_migrated")
+            else bool(
+                options.get(CONF_PASSIVE_ONLY, data.get(CONF_PASSIVE_ONLY, False))
+                or is_passive_mode(entry, device)
+            )
+        )
         data_schema = vol.Schema(
             {
                 vol.Optional(
@@ -581,10 +600,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ): vol.All(vol.Coerce(int), vol.Range(min=5, max=300)),
                 vol.Optional(
                     CONF_PASSIVE_ONLY,
-                    default=options.get(
-                        CONF_PASSIVE_ONLY,
-                        data.get(CONF_PASSIVE_ONLY, False),
-                    ),
+                    default=passive_default,
                 ): bool,
                 vol.Optional(
                     CONF_ATTEMPT_PAIRING,
@@ -633,6 +649,8 @@ class ACInfinityOptionsFlowHandler(OptionsFlow):
     ) -> FlowResult:
         """Manage the options."""
         entry = self._entry
+        options = entry.options if entry and getattr(entry, "options", None) else {}
+        data = entry.data if entry and getattr(entry, "data", None) else {}
         if user_input is not None:
             hass = getattr(self, "hass", None)
             if (
@@ -644,10 +662,28 @@ class ACInfinityOptionsFlowHandler(OptionsFlow):
                 entry_data = hass.data[DOMAIN][entry.entry_id]
                 if hasattr(entry_data, "device") and hasattr(entry_data.device, "attempt_pairing"):
                     entry_data.device.attempt_pairing = user_input.get(CONF_ATTEMPT_PAIRING, False)
-            return self.async_create_entry(title="", data=user_input)
+            saved_options = dict(user_input)
+            if options.get("_passive_migrated") or is_passive_mode(entry, None):
+                saved_options["_passive_migrated"] = True
+            return self.async_create_entry(title="", data=saved_options)
 
-        options = entry.options if entry and getattr(entry, "options", None) else {}
-        data = entry.data if entry and getattr(entry, "data", None) else {}
+        device = None
+        hass = getattr(self, "hass", None)
+        if (
+            entry is not None
+            and hass is not None
+            and DOMAIN in getattr(hass, "data", {})
+            and getattr(entry, "entry_id", None) in hass.data[DOMAIN]
+        ):
+            device = getattr(hass.data[DOMAIN][entry.entry_id], "device", None)
+        passive_default = (
+            bool(options.get(CONF_PASSIVE_ONLY, data.get(CONF_PASSIVE_ONLY, False)))
+            if options.get("_passive_migrated")
+            else bool(
+                options.get(CONF_PASSIVE_ONLY, data.get(CONF_PASSIVE_ONLY, False))
+                or is_passive_mode(entry, device)
+            )
+        )
         data_schema = vol.Schema(
             {
                 vol.Optional(
@@ -659,10 +695,7 @@ class ACInfinityOptionsFlowHandler(OptionsFlow):
                 ): vol.All(vol.Coerce(int), vol.Range(min=5, max=300)),
                 vol.Optional(
                     CONF_PASSIVE_ONLY,
-                    default=options.get(
-                        CONF_PASSIVE_ONLY,
-                        data.get(CONF_PASSIVE_ONLY, False),
-                    ),
+                    default=passive_default,
                 ): bool,
                 vol.Optional(
                     CONF_ATTEMPT_PAIRING,

@@ -97,8 +97,9 @@ class ACInfinityDisplaySwitch(
     @callback
     def _update_attrs(self) -> None:
         """Handle updating _attr values."""
-        # None until first toggled -> HA shows the switch as unknown.
-        self._attr_is_on = self._device.display_on
+        self._attr_is_on = (
+            True if self._device.display_on is None else self._device.display_on
+        )
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -127,7 +128,7 @@ class ACInfinityAutoHighSwitch(ACInfinityDisplaySwitch):
 
     @callback
     def _update_attrs(self) -> None:
-        self._attr_is_on = self._device.state.auto_high_on
+        self._attr_is_on = bool(self._device.state.auto_high_on)
 
 
 class ACInfinityAutoLowSwitch(ACInfinityDisplaySwitch):
@@ -150,4 +151,4 @@ class ACInfinityAutoLowSwitch(ACInfinityDisplaySwitch):
 
     @callback
     def _update_attrs(self) -> None:
-        self._attr_is_on = self._device.state.auto_low_on
+        self._attr_is_on = bool(self._device.state.auto_low_on)

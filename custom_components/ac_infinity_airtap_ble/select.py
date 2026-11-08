@@ -95,8 +95,7 @@ class ACInfinityDisplayBrightness(
     def _update_attrs(self) -> None:
         """Handle updating _attr values."""
         level = self._device.display_brightness_level
-        # None until first set -> HA shows no selection.
-        self._attr_current_option = str(level) if level is not None else None
+        self._attr_current_option = str(level) if level is not None else "5"
 
     @callback
     def _handle_coordinator_update(self) -> None:

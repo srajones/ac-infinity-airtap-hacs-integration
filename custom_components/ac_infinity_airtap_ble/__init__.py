@@ -11,7 +11,7 @@ from homeassistant.const import CONF_ADDRESS, CONF_SERVICE_DATA, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import CONF_ATTEMPT_PAIRING, DOMAIN, is_passive_mode
+from .const import CONF_ATTEMPT_PAIRING, CONF_PASSIVE_ONLY, DOMAIN, is_passive_mode
 from .coordinator import ACInfinityDataUpdateCoordinator
 from .device import ACInfinityDevice, DeviceInfoEx
 from .models import ACInfinityData
@@ -67,6 +67,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = ACInfinityData(
         entry.title, device, coordinator
     )
+
+    if (
+        is_passive_mode(entry, device)
+        and not (entry.options or {}).get(CONF_PASSIVE_ONLY)
+        and not (entry.options or {}).get("_passive_migrated")
+    ):
+        with contextlib.suppress(Exception):
+            hass.config_entries.async_update_entry(
+                entry,
+                options={
+                    **(entry.options or {}),
+                    CONF_PASSIVE_ONLY: True,
+                    "_passive_migrated": True,
+                },
+            )
 
     _async_cleanup_stale_entities(hass, entry, device)
 
