@@ -1,0 +1,95 @@
+{
+  "entity": {
+    "sensor": {
+      "temperature": {
+        "default": "mdi:thermometer"
+      },
+      "humidity": {
+        "default": "mdi:water-percent"
+      },
+      "current_speed": {
+        "default": "mdi:fan"
+      },
+      "mode": {
+        "default": "mdi:tune-variant"
+      },
+      "operating_mode": {
+        "default": "mdi:tune-variant"
+      },
+      "vpd": {
+        "default": "mdi:water-opacity"
+      },
+      "signal_strength": {
+        "default": "mdi:bluetooth"
+      },
+      "firmware": {
+        "default": "mdi:cellphone-arrow-down"
+      },
+      "firmware_revision": {
+        "default": "mdi:cellphone-arrow-down"
+      },
+      "software_revision": {
+        "default": "mdi:cellphone-arrow-down"
+      },
+      "hardware_revision": {
+        "default": "mdi:chip"
+      },
+      "protocol_version": {
+        "default": "mdi:information-outline"
+      },
+      "on_speed": {
+        "default": "mdi:fan-speed-1"
+      }
+    },
+    "fan": {
+      "fan": {
+        "default": "mdi:fan"
+      }
+    },
+    "select": {
+      "mode": {
+        "default": "mdi:tune-variant"
+      },
+      "display_brightness": {
+        "default": "mdi:brightness-6"
+      },
+      "temperature_unit": {
+        "default": "mdi:temperature-celsius"
+      }
+    },
+    "number": {
+      "speed": {
+        "default": "mdi:fan-speed-1"
+      },
+      "on_speed": {
+        "default": "mdi:fan-speed-1"
+      },
+      "off_speed": {
+        "default": "mdi:fan-off"
+      },
+      "temperature_calibration": {
+        "default": "mdi:thermometer-check"
+      },
+      "auto_transition": {
+        "default": "mdi:stairs-up"
+      },
+      "auto_high_trigger": {
+        "default": "mdi:thermometer-chevron-up"
+      },
+      "auto_low_trigger": {
+        "default": "mdi:thermometer-chevron-down"
+      }
+    },
+    "switch": {
+      "display": {
+        "default": "mdi:brightness-6"
+      },
+      "auto_high_trigger": {
+        "default": "mdi:toggle-switch"
+      },
+      "auto_low_trigger": {
+        "default": "mdi:toggle-switch"
+      }
+    }
+  }
+}

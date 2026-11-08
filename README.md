@@ -1,3 +1,5 @@
+![AC Infinity AirTap Icon](https://raw.githubusercontent.com/srajones/ac-infinity-airtap-hacs-integration/main/custom_components/ac_infinity_airtap_ble/brand/icon@2x.png)
+
 # AC Infinity AirTap HACS Integration
 
 Version **2.2.0-fix.5**, on `main` only. Realized against physical official AC Infinity Android app v2.1.2 HCI snoop packet captures on the AirTap T6 (`A4:C1:38:F6:48:F6`).
@@ -98,7 +100,7 @@ See [the investigation and exact APK class/line citations](docs/AIRTAP_INVESTIGA
 </p>
 
 <p align="center">
-<a href="https://www.buymeacoffee.com/JMISm06AD"><img src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"></a>
+<a href="https://buymeacoffee.com/srajones"><img src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"></a>
 </p>
 
 A Home Assistant custom integration for **local Bluetooth LE control** of
