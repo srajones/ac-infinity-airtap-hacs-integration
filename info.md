@@ -1,4 +1,4 @@
-# AC Infinity AirTap (BLE)
+# AC Infinity AirTap HACS Integration
 
 Local **Bluetooth LE** control of AC Infinity AirTap register / booster-fan vents
 (e.g. the AIRTAP T4) — no vendor cloud or phone app required.
@@ -11,4 +11,4 @@ Requires a connectable Bluetooth path in range of the vent (an ESPHome
 scanning is recommended.
 
 After installing via HACS, restart Home Assistant, then add the integration from
-**Settings → Devices & Services → Add Integration → AC Infinity AirTap (BLE)**.
+**Settings → Devices & Services → Add Integration → AC Infinity AirTap HACS Integration**.

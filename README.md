@@ -1,14 +1,14 @@
-# AC Infinity AirTap & Multi-Vent BLE Integration
+# AC Infinity AirTap HACS Integration
 
 Version **2.2.0-fix.5**, on `main` only. Realized against physical official AC Infinity Android app v2.1.2 HCI snoop packet captures on the AirTap T6 (`A4:C1:38:F6:48:F6`).
 
 ## Install / update in HACS
 
 1. Back up HA. Remove the downloaded original `ljmerza/ac-infinity-airtap-ble` repository/files from HACS if still present. Both builds use **the same domain/folder `ac_infinity_airtap_ble`**: replace, do not install alongside. Existing HA config entries need not be deleted just to update.
-2. HACS → ⋮ → **Custom repositories** → URL `https://github.com/srajones/ac-infinity-airtap-ble-fix`, category **Integration**.
+2. HACS → ⋮ → **Custom repositories** → URL `https://github.com/srajones/ac-infinity-airtap-hacs-integration`, category **Integration**.
 3. Open this fork → **Redownload → main** (or select release `2.2.0-fix.5`), restart HA, and check its manifest reads `2.2.0-fix.5`.
 4. Confirm HA's configured timezone is correct (David: **America/Detroit**). Fully close the AC Infinity phone app so it does not compete for the BLE connection.
-5. Settings → Devices & services → Add integration → **AC Infinity AirTap (BLE)** → `D-8DAQJ` / `A4:C1:38:F6:48:F6`, or retry/reload the existing entry.
+5. Settings → Devices & services → Add integration → **AC Infinity AirTap HACS Integration** → `D-8DAQJ` / `A4:C1:38:F6:48:F6`, or retry/reload the existing entry.
 
 The patched protocol library is bundled; no manual pip installation is needed.
 
@@ -87,14 +87,14 @@ See [the investigation and exact APK class/line citations](docs/AIRTAP_INVESTIGA
 
 ## Original project documentation
 
-# AC Infinity AirTap (BLE)
+# AC Infinity AirTap HACS Integration
 
 <p align="center">
-<img src="https://img.shields.io/github/stars/ljmerza/ac-infinity-airtap-ble?style=for-the-badge&label=Stars&color=orange" alt="Stars">
-<a href="https://github.com/ljmerza/ac-infinity-airtap-ble/releases/latest"><img src="https://img.shields.io/github/v/release/ljmerza/ac-infinity-airtap-ble?style=for-the-badge&color=purple" alt="Version"></a>
-<a href="https://github.com/ljmerza/ac-infinity-airtap-ble/actions/workflows/lint.yml"><img src="https://img.shields.io/github/actions/workflow/status/ljmerza/ac-infinity-airtap-ble/lint.yml?style=for-the-badge&label=Lint" alt="Lint"></a>
-<a href="https://github.com/ljmerza/ac-infinity-airtap-ble/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/ljmerza/ac-infinity-airtap-ble/validate.yml?style=for-the-badge&label=Validate" alt="Validate"></a>
-<a href="https://github.com/ljmerza/ac-infinity-airtap-ble/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ljmerza/ac-infinity-airtap-ble?style=for-the-badge&label=License&color=green" alt="License"></a>
+<img src="https://img.shields.io/github/stars/srajones/ac-infinity-airtap-hacs-integration?style=for-the-badge&label=Stars&color=orange" alt="Stars">
+<a href="https://github.com/srajones/ac-infinity-airtap-hacs-integration/releases/latest"><img src="https://img.shields.io/github/v/release/srajones/ac-infinity-airtap-hacs-integration?style=for-the-badge&color=purple" alt="Version"></a>
+<a href="https://github.com/srajones/ac-infinity-airtap-hacs-integration/actions/workflows/lint.yml"><img src="https://img.shields.io/github/actions/workflow/status/srajones/ac-infinity-airtap-hacs-integration/lint.yml?style=for-the-badge&label=Lint" alt="Lint"></a>
+<a href="https://github.com/srajones/ac-infinity-airtap-hacs-integration/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/srajones/ac-infinity-airtap-hacs-integration/validate.yml?style=for-the-badge&label=Validate" alt="Validate"></a>
+<a href="https://github.com/srajones/ac-infinity-airtap-hacs-integration/blob/main/LICENSE"><img src="https://img.shields.io/github/license/srajones/ac-infinity-airtap-hacs-integration?style=for-the-badge&label=License&color=green" alt="License"></a>
 </p>
 
 <p align="center">
@@ -149,14 +149,14 @@ apply in Auto. A vent with a high Off Speed can run fast in Auto when it isn't t
 **HACS (custom repository):**
 
 1. HACS → ⋯ → *Custom repositories* → add
-   `https://github.com/srajones/ac-infinity-airtap-ble-fix` as an **Integration**.
-2. Install **AC Infinity AirTap (BLE)**, then restart Home Assistant.
+   `https://github.com/srajones/ac-infinity-airtap-hacs-integration` as an **Integration**.
+2. Install **AC Infinity AirTap HACS Integration**, then restart Home Assistant.
 
 **Manual:** copy `custom_components/ac_infinity_airtap_ble/` into your HA `config/custom_components/`.
 
 ## Setup
 
-Settings → **Devices & Services** → **Add Integration** → *AC Infinity AirTap (BLE)*.
+Settings → **Devices & Services** → **Add Integration** → *AC Infinity AirTap HACS Integration*.
 
 - If the vent is advertising AC Infinity manufacturer data (company id `0x0902`),
   it is offered for auto-discovery / appears in the device list.
