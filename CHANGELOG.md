@@ -1,3 +1,12 @@
+## 2.2.0-fix.5 — Broad Vent Compatibility, Protocol Realignment, and Guaranteed Ambient Temperature
+
+- **Feature 16 (Ambient Temperature Guarantee):** Decoupled config flow setup validation so active GATT connection or query timeouts never abort integration setup; gracefully falls back to BLE advertisement manufacturer data (Company ID 2306) guaranteeing the ambient air temperature sensor is always exposed in Home Assistant for HVAC heat pump monitoring.
+- **Feature 19 (Broad Vent Compatibility):** Expanded `DEVICE_MODEL` and protocol family resolution to support all AC Infinity Telink chip devices (`{4, 5, 6, 14, 15, 24, 25}`), legacy models (`{1, 2, 6}`), newer AirTap models (Type 48 `Air_Tap`), and all controller models (`{1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 33, 39, 40, 48, 49, 50, 64}`). Unknown model types gracefully fall back to generic naming instead of raising `unsupported_model`.
+- **Maximum Entities & Sensors:** Added Operating Mode sensor (`0x10`), On Speed number entity (`0x12`), Signal Strength (RSSI) diagnostic sensor, Protocol Version and Hardware/Software/Firmware Revision diagnostic sensors, Mode selector, and rich fan state attributes.
+- **Self-Healing BLE & Multi-Proxy Resilience:** Restored sensors on HA startup via `RestoreSensor`/`RestoreEntity`; eliminated stale advertisement discard bug on proxy handover; refreshed BLEDevice handles dynamically; strict per-step async timeouts preventing event-loop hangs.
+- **Protocol Realignment (Official App v2.1.2):** Implemented MTU 247 negotiation, 1500ms post-CCCD ACK settle delay, single-PDU 21-byte calendar clock sync at Seq 0, separate write types (acknowledged 0x12 for setup/clock/GET, unacknowledged 0x52 for fan speed/mode control), and strict Telink OTA characteristic guard (ValueError on handle 28).
+- **Tools Preservation:** Tracked and documented `tools/btsnoop_decoder.py` and `tools/capture_airtap_snoop.py` alongside test suite.
+
 ## 2.2.0-fix.4 — Official-app calendar initialization
 
 - Full APK type-6 connect-path audit: normal dashboard clock-before-GET flow, control UUIDs, acknowledged write type, MTU247 request, no type-6 bond/key/password or extra-notification prerequisite found.

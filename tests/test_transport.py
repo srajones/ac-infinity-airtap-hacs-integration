@@ -337,3 +337,156 @@ async def test_failed_connect_or_discovery_has_specific_error_and_cleanup(monkey
     assert dev._client is None
     if stage != "connect":
         client.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mtu_negotiation_requests_247_and_handles_graceful_fallback():
+    from bleak.exc import BleakError
+    dev = controller()
+    client = SimpleNamespace(request_mtu=AsyncMock(return_value=247), mtu_size=247)
+    await dev._negotiate_mtu(client)
+    client.request_mtu.assert_awaited_once_with(247)
+    assert dev.negotiated_mtu == 247
+
+    # Fallback when request_mtu raises NotImplementedError or BleakError
+    client_err = SimpleNamespace(request_mtu=AsyncMock(side_effect=NotImplementedError), mtu_size=23)
+    await dev._negotiate_mtu(client_err)
+    assert dev.negotiated_mtu == 23
+
+    client_bleak_err = SimpleNamespace(request_mtu=AsyncMock(side_effect=BleakError("unsupported")), mtu_size=23)
+    await dev._negotiate_mtu(client_bleak_err)
+    assert dev.negotiated_mtu == 23
+
+
+@pytest.mark.asyncio
+async def test_write_type_separation_settings_use_write_cmd_queries_use_write_req():
+    dev = controller()
+    dev._read_char = char(READ[0], ["notify"])
+    dev._write_char = char(WRITE[0], ["write", "write-without-response"])
+
+    calls = []
+    async def write(characteristic, data, response):
+        calls.append((bytes(data), response))
+        dev._notification_handler(dev._read_char, bytearray(data))
+
+    dev._client = SimpleNamespace(write_gatt_char=write)
+
+    # 1. Query command (Opcode 1) -> ATT_WRITE_REQ (response=True)
+    query_cmd = Protocol().get_model_data(6, 1, 2)
+    assert query_cmd[9] == 1
+    await dev._execute_command_locked(query_cmd)
+    assert calls[-1][1] is True
+
+    # 2. Operational setting command (Opcode 3, e.g. fan speed key 0x12) -> ATT_WRITE_CMD (response=False)
+    setting_cmd = Protocol()._add_head([0x12, 1, 5], 3, 2)
+    assert setting_cmd[9] == 3
+    await dev._execute_command_locked(setting_cmd)
+    assert calls[-1][1] is False
+
+    # 3. Calendar clock sync command (Opcode 3, payload starting with 0x01, 0x07) -> ATT_WRITE_REQ (response=True)
+    clock_cmd = Protocol()._add_head([0x01, 0x07, 0x1A, 0x0B, 0x07, 0x06, 0x13, 0x15, 0x21], 3, 0)
+    await dev._execute_command_locked(clock_cmd)
+    assert calls[-1][1] is True
+
+
+@pytest.mark.asyncio
+async def test_opcode_0x66_status_notification_accepted_for_command_3():
+    from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble.util import crc16
+    dev = controller()
+    dev._pending_sequence = 2
+    dev._pending_command = 3
+    dev._notify_future = asyncio.get_running_loop().create_future()
+
+    # Opcode 0x66 carries independent sequence number (e.g. 5 != 2)
+    frame = bytearray(Protocol()._add_head([0x10, 1, 2], 3, 5))
+    frame[9] = 0x66
+    frame[-2:] = crc16(frame, 8, len(frame) - 10)
+
+    # Notification handler should accept Opcode 0x66 and resolve the future
+    dev._notification_handler(1, frame)
+    assert dev._notify_future.done()
+    assert dev._notify_future.result() == frame
+
+
+@pytest.mark.asyncio
+async def test_telink_ota_guard_rejects_handle_28_and_ota_uuids():
+    from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble.device import validate_not_ota_endpoint
+
+    with pytest.raises(ValueError, match="strictly forbidden"):
+        validate_not_ota_endpoint(28)
+
+    with pytest.raises(ValueError, match="strictly forbidden"):
+        validate_not_ota_endpoint("00010203-0405-0607-0809-0a0b0c0d2b12")
+
+    with pytest.raises(ValueError, match="strictly forbidden"):
+        validate_not_ota_endpoint(SimpleNamespace(handle=28, uuid="some-uuid"))
+
+    with pytest.raises(ValueError, match="strictly forbidden"):
+        validate_not_ota_endpoint(SimpleNamespace(handle=99, uuid="00010203-0405-0607-0809-0a0b0c0d2b12"))
+
+    # Test in _execute_command_locked
+    dev = controller()
+    dev._read_char = char(READ[0], ["notify"])
+    dev._write_char = SimpleNamespace(handle=28, uuid="00010203-0405-0607-0809-0a0b0c0d2b12", properties=["write"])
+    dev._client = SimpleNamespace(write_gatt_char=AsyncMock())
+
+    with pytest.raises(ValueError, match="strictly forbidden"):
+        await dev._execute_command_locked(Protocol().get_model_data(6, 1, 2))
+    dev._client.write_gatt_char.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_settle_delay_post_cccd_with_zero_intervening_reads(monkeypatch):
+    from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble import device as transport
+    from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble.device import TELINK_SETTLE_DELAY
+
+    dev = controller()
+    read_c = char(READ[0], ["notify"])
+    write_c = char(WRITE[0], ["write"])
+    client = SimpleNamespace(
+        start_notify=AsyncMock(),
+        read_gatt_char=AsyncMock(),
+        write_gatt_char=AsyncMock(),
+        is_connected=True,
+        services=[],
+        mtu_size=247,
+    )
+    events = []
+
+    async def fake_connect(*args, **kwargs):
+        events.append("connect")
+        return client
+
+    async def fake_start_notify(*args, **kwargs):
+        events.append("start_notify")
+
+    async def fake_sleep(duration):
+        events.append(f"sleep_{duration}")
+
+    async def fake_read(*args, **kwargs):
+        events.append("read")
+
+    async def fake_clock_sync():
+        events.append("clock_sync")
+
+    client.start_notify.side_effect = fake_start_notify
+    client.read_gatt_char.side_effect = fake_read
+    monkeypatch.setattr(transport, "establish_connection", AsyncMock(side_effect=fake_connect))
+    monkeypatch.setattr(dev, "_resolve_characteristics", lambda s: setattr(dev, "_read_char", read_c) or setattr(dev, "_write_char", write_c) or True)
+    monkeypatch.setattr(dev, "_read_device_information", AsyncMock(side_effect=fake_read))
+    monkeypatch.setattr(dev, "_initialize_telink_session", AsyncMock(side_effect=fake_clock_sync))
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await dev._ensure_connected()
+
+    assert "start_notify" in events
+    start_notify_idx = events.index("start_notify")
+    sleep_idx = events.index(f"sleep_{TELINK_SETTLE_DELAY}")
+    clock_idx = events.index("clock_sync")
+
+    # Strict ordering: start_notify -> sleep 1.5s -> clock sync
+    assert start_notify_idx < sleep_idx < clock_idx
+    # Zero read calls occurred between start_notify and clock_sync
+    events_between = events[start_notify_idx + 1:clock_idx]
+    assert "read" not in events_between
+

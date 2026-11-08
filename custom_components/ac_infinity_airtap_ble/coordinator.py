@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import struct
 
 import async_timeout
 from .vendor.ac_infinity_ble import DeviceInfo
@@ -51,6 +52,11 @@ class ACInfinityDataUpdateCoordinator(PassiveBluetoothDataUpdateCoordinator):
         self._last_adverts: dict[str, bytes] = {}
         controller.register_callback(self._handle_device_callback)
         self._malformed_advertisement = False
+        controller.set_ble_device_callback(
+            lambda: bluetooth.async_ble_device_from_address(
+                self.hass, self.ble_device.address, connectable=True
+            )
+        )
 
     @callback
     def _async_handle_bluetooth_event(
@@ -73,7 +79,7 @@ class ACInfinityDataUpdateCoordinator(PassiveBluetoothDataUpdateCoordinator):
         if data:
             try:
                 self._handle_manufacturer_data(service_info, data)
-            except (ValueError, IndexError, KeyError):
+            except (ValueError, IndexError, KeyError, struct.error, Exception):
                 self.logger.debug("%s: Invalid Bluetooth advertisement", self.ble_device.address,
                                   exc_info=True)
                 if not self._malformed_advertisement:
@@ -106,9 +112,8 @@ class ACInfinityDataUpdateCoordinator(PassiveBluetoothDataUpdateCoordinator):
         """
         source = service_info.source
         previous = self._last_adverts.get(source)
-        first_overall = not self._last_adverts
         self._last_adverts[source] = data
-        if previous == data or (previous is None and not first_overall):
+        if previous == data:
             return
         self.controller.set_ble_device_and_advertisement_data(
             service_info.device, service_info.advertisement, use_speed=previous is not None
@@ -140,5 +145,5 @@ class ActiveBluetoothCoordinatorEntity[
 
     @property
     def available(self) -> bool:
-        """A failed command marks the device unavailable until a new advert/reply."""
-        return self.coordinator.controller.last_command_success
+        """Keep entities available while coordinator tracks the device in range."""
+        return self.coordinator.available

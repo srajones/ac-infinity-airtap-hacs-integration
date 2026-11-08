@@ -18,9 +18,15 @@ from bleak_retry_connector import (
 )
 
 from .const import (
+    DEFAULT_MTU,
     MANUFACTURER_ID,
     POSSIBLE_READ_CHARACTERISTIC_UUIDS,
     POSSIBLE_WRITE_CHARACTERISTIC_UUIDS,
+    TARGET_MTU,
+    TELINK_DEVICE_TYPES,
+    TELINK_OTA_FORBIDDEN_HANDLES,
+    TELINK_OTA_FORBIDDEN_UUIDS,
+    TELINK_SETTLE_DELAY,
     CallbackType,
 )
 from .exceptions import BLEStepError, CharacteristicMissingError
@@ -47,6 +53,25 @@ DIAGNOSTIC_READ_UUIDS = frozenset(REVISION_CHARACTERISTICS.values()) | {
 }
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def validate_not_ota_endpoint(target: BleakGATTCharacteristic | int | str | None) -> None:
+    """Strict Telink OTA guard: immediately raise ValueError before any I/O."""
+    if target is None:
+        return
+    if isinstance(target, int):
+        if target in TELINK_OTA_FORBIDDEN_HANDLES:
+            raise ValueError(f"Access to Telink OTA handle {target} is strictly forbidden (not on allowlist)")
+    elif isinstance(target, str):
+        if target.lower() in TELINK_OTA_FORBIDDEN_UUIDS:
+            raise ValueError(f"Access to Telink OTA UUID {target} is strictly forbidden (not on allowlist)")
+    else:
+        handle = getattr(target, "handle", None)
+        uuid = getattr(target, "uuid", None)
+        if handle in TELINK_OTA_FORBIDDEN_HANDLES:
+            raise ValueError(f"Access to Telink OTA handle {handle} is strictly forbidden (not on allowlist)")
+        if uuid and str(uuid).lower() in TELINK_OTA_FORBIDDEN_UUIDS:
+            raise ValueError(f"Access to Telink OTA UUID {uuid} is strictly forbidden (not on allowlist)")
 
 
 class ACInfinityController:
@@ -87,6 +112,22 @@ class ACInfinityController:
         self._device_information_attempted = False
         self._diagnostic_warning = False
         self._cccd_warning = False
+        self._negotiated_mtu: int = DEFAULT_MTU
+        self._ble_device_callback: Callable[[], BLEDevice | None] | None = None
+        self._firmware_revision: str | None = None
+        self._hardware_revision: str | None = None
+        self._software_revision: str | None = None
+
+    def set_ble_device_callback(self, callback: Callable[[], BLEDevice | None]) -> None:
+        """Set callback to resolve fresh connectable BLEDevice before connection."""
+        self._ble_device_callback = callback
+
+    def _get_ble_device(self) -> BLEDevice:
+        """Return freshest BLEDevice instance."""
+        if self._ble_device_callback is not None:
+            if fresh := self._ble_device_callback():
+                self._ble_device = fresh
+        return self._ble_device
 
     def set_ble_device_and_advertisement_data(
         self, ble_device: BLEDevice, advertisement_data: AdvertisementData
@@ -148,6 +189,11 @@ class ACInfinityController:
         if self._advertisement_data:
             return self._advertisement_data.rssi
         return None
+
+    @property
+    def negotiated_mtu(self) -> int:
+        """Get the negotiated ATT MTU."""
+        return self._negotiated_mtu
 
     @property
     def state(self) -> DeviceInfo:
@@ -273,19 +319,23 @@ class ACInfinityController:
             step, code = "connect", "connect_failed"
             try:
                 _LOGGER.debug("%s [%s]: BLE connect; RSSI=%s", self.name, self.address, self.rssi)
+                ble_device = self._get_ble_device()
                 async with asyncio.timeout(45):
                     client = await establish_connection(
-                        BleakClientWithServiceCache, self._ble_device, self.name,
+                        BleakClientWithServiceCache, ble_device, self.name,
                         self._disconnected, max_attempts=DEFAULT_ATTEMPTS,
-                        use_services_cache=True, ble_device_callback=lambda: self._ble_device,
+                        use_services_cache=True, ble_device_callback=self._get_ble_device,
                     )
+                self._client = client
+                step, code = "mtu negotiation", "connect_failed"
+                await self._negotiate_mtu(client)
+
                 step, code = "service discovery", "service_failed"
                 if not self._resolve_characteristics(client.services):
                     raise BLEStepError(step, "unsupported_model", "No supported notify/write characteristic pair")
-                self._client = client
                 if self._setup_diagnostics:
                     self._log_connection_context(client)
-                    await self._log_subscription_state(client, "before_subscribe")
+                    await self._read_device_information(client)
                 step, code = "notification subscription", "notify_failed"
                 _LOGGER.debug("%s [%s]: BLE subscribe uuid=%s handle=%s",
                               self.name, self.address, self._read_char.uuid, self._read_char.handle)
@@ -299,19 +349,13 @@ class ACInfinityController:
                 async with asyncio.timeout(GATT_TIMEOUT):
                     await client.start_notify(self._read_char, notification_handler)
                 _LOGGER.debug("%s: BLE start_notify completed uuid=%s", self.name, self._read_char.uuid)
-                if self._setup_diagnostics:
-                    await self._log_subscription_state(client, "after_subscribe")
-                    await self._read_device_information(client)
-                if self._state.type == 6:
-                    # Android 2.1.2 BleController.connect -> v3 uses a 1500ms
-                    # post-subscribe/revision delay for isTelinkChip(type),
-                    # which explicitly includes AirTap type 6. A GATT ACK does
-                    # not mean this chip is ready to interpret control frames.
+                if self._state.type in TELINK_DEVICE_TYPES:
                     step, code = "Telink readiness", "connect_failed"
-                    _LOGGER.debug("%s: BLE Telink readiness wait start: type=6 delay=1.5s "
-                                  "after subscribe/revision reads (Android 2.1.2)", self.name)
+                    _LOGGER.debug("%s: BLE Telink readiness wait start: type=%s delay=%.1fs "
+                                  "strictly post-CCCD ACK (Android 2.1.2 protocol conformance)",
+                                  self.name, self._state.type, TELINK_SETTLE_DELAY)
                     started = self.loop.time()
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(TELINK_SETTLE_DELAY)
                     if self._client is not client or not client.is_connected:
                         raise BLEStepError(step, code, "Device disconnected during Telink settle delay")
                     _LOGGER.debug("%s: BLE Telink readiness wait completed elapsed=%.3fs; "
@@ -341,13 +385,45 @@ class ACInfinityController:
         """Return aware local time; HA overrides this with its configured timezone."""
         return datetime.now().astimezone()
 
+    async def _negotiate_mtu(self, client) -> int:
+        """Negotiate ATT MTU 247 where supported by client/backend; handle MTU constraints gracefully."""
+        if hasattr(client, "request_mtu"):
+            try:
+                res = client.request_mtu(TARGET_MTU)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception as err:
+                _LOGGER.debug("%s: client.request_mtu(%d) failed: %s", self.name, TARGET_MTU, err)
+        elif hasattr(getattr(client, "_backend", None), "request_mtu"):
+            try:
+                res = client._backend.request_mtu(TARGET_MTU)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception as err:
+                _LOGGER.debug("%s: backend request_mtu(%d) failed: %s", self.name, TARGET_MTU, err)
+        mtu = getattr(client, "mtu_size", DEFAULT_MTU)
+        try:
+            if callable(mtu):
+                mtu = mtu()
+        except Exception:
+            mtu = DEFAULT_MTU
+        self._negotiated_mtu = int(mtu) if isinstance(mtu, (int, float)) else DEFAULT_MTU
+        if self._negotiated_mtu >= TARGET_MTU:
+            _LOGGER.debug("%s [%s]: ATT MTU negotiated to %d bytes", self.name, self.address, self._negotiated_mtu)
+        else:
+            _LOGGER.debug("%s [%s]: ATT MTU is %d bytes (target %d); handling MTU constraints gracefully",
+                          self.name, self.address, self._negotiated_mtu, TARGET_MTU)
+        return self._negotiated_mtu
+
     async def _initialize_telink_session(self) -> None:
         """Clock-sync only; never provision preferences or change fan/mode settings."""
+        validate_not_ota_endpoint(self._write_char)
+        validate_not_ota_endpoint(self._read_char)
         if (self._write_char.uuid.lower() != POSSIBLE_WRITE_CHARACTERISTIC_UUIDS[0].lower()
                 or self._read_char.uuid.lower() != POSSIBLE_READ_CHARACTERISTIC_UUIDS[0].lower()
                 or "write" not in self._write_char.properties):
             raise BLEStepError("clock sync write", "unsupported_model",
-                               "Type-6 app initialization requires the 70d51001/02 acknowledged pair")
+                               f"Type-{self._state.type} app initialization requires the 70d51001/02 acknowledged pair")
         # Android constructs new connection state with sequence=-1; allocation
         # increments first, so clock is 0, then the first read is 1.
         self._sequence = -1
@@ -406,6 +482,7 @@ class ACInfinityController:
 
     async def _read_diagnostic_characteristic(self, client, characteristic, label: str) -> bytes | None:
         """Read ONLY allowlisted revision/PnP/control-reply values; never an OTA endpoint."""
+        validate_not_ota_endpoint(characteristic)
         if characteristic.uuid.lower() not in DIAGNOSTIC_READ_UUIDS:
             raise ValueError("Characteristic is outside the diagnostic read allowlist")
         if "read" not in characteristic.properties:
@@ -440,7 +517,18 @@ class ACInfinityController:
             if characteristic is None:
                 _LOGGER.debug("%s: BLE diagnostic %s absent", self.name, label)
                 continue
-            await self._read_diagnostic_characteristic(client, characteristic, label)
+            val = await self._read_diagnostic_characteristic(client, characteristic, label)
+            if val is not None:
+                try:
+                    str_val = val.decode("utf-8", errors="replace").strip("\x00")
+                    if label == "firmware_revision":
+                        self._firmware_revision = str_val
+                    elif label == "hardware_revision":
+                        self._hardware_revision = str_val
+                    elif label == "software_revision":
+                        self._software_revision = str_val
+                except Exception:
+                    pass
             if not client.is_connected:
                 raise BLEStepError("device information read", "connect_failed",
                                    "Device disconnected during optional diagnostic reads")
@@ -492,7 +580,7 @@ class ACInfinityController:
         frame = bytes(packet[:length])
         packet.clear()
         if (len(frame) != length or bytes(crc16(frame, 8, length - 10)) != frame[-2:]
-                or int.from_bytes(frame[4:6], "big") != self._pending_sequence
+                or (frame[9] != 0x66 and int.from_bytes(frame[4:6], "big") != self._pending_sequence)
                 or frame[8] != 0
                 or frame[9] not in ({3, 0x66} if self._pending_command == 3 else {self._pending_command})):
             _LOGGER.debug("%s: Ignoring unmatched/invalid response: %s", self.name, frame.hex())
@@ -539,6 +627,11 @@ class ACInfinityController:
             return
         if self._client is client:
             self._client = None
+            self._read_char = None
+            self._write_char = None
+            self._response_buffer.clear()
+            self._pending_sequence = None
+            self._pending_command = None
             if self._notify_future and not self._notify_future.done():
                 self._notify_future.set_exception(
                     BLEStepError("response wait", "connect_failed", "Device disconnected during command"))
@@ -580,6 +673,9 @@ class ACInfinityController:
             self._expected_disconnect = True
             self._client = None
             self._read_char = self._write_char = None
+            self._response_buffer.clear()
+            self._pending_sequence = None
+            self._pending_command = None
             if self._disconnect_timer:
                 self._disconnect_timer.cancel()
                 self._disconnect_timer = None
@@ -661,6 +757,7 @@ class ACInfinityController:
         """Write according to advertised capabilities and await a matching reply."""
         if self._client is None or not self._read_char or not self._write_char:
             raise BLEStepError("write", "service_failed", "Missing active GATT pair")
+        validate_not_ota_endpoint(self._write_char)
         # Diagnostics must finish before registering a pending request: a stored
         # value or unsolicited notification during that read is not a query reply.
         if self._setup_diagnostics and command[9] == 1 and self._state.type != 6:
@@ -673,22 +770,34 @@ class ACInfinityController:
         self._pending_sequence = int.from_bytes(command[4:6], "big")
         self._pending_command = command[9]
         self._response_buffer.clear()
-        # Match the official app's acknowledged write when the device supports it.
-        response = "write" in self._write_char.properties
-        is_clock = (self._state.type == 6 and len(command) == 21
+        is_clock = (self._state.type in TELINK_DEVICE_TYPES and len(command) == 21
                     and command[8:12] == b"\x00\x03\x01\x07")
+        is_query = (command[9] == 1)
+        is_setting = (command[9] == 3 and not is_clock)
+        has_write = "write" in self._write_char.properties
+        has_write_cmd = "write-without-response" in self._write_char.properties
+
+        if is_clock:
+            if not has_write:
+                raise BLEStepError("clock sync write", "unsupported_model", "Clock requires acknowledged write")
+            response = True
+        elif is_query:
+            response = True if has_write else False
+        elif is_setting:
+            # Operational fan speed and mode adjustments use ATT_WRITE_CMD (response=False)
+            # when supported by characteristic, matching official Android app capture Event 18
+            response = False if has_write_cmd else True
+        else:
+            response = True if has_write else False
+
         step, code = ("clock sync write" if is_clock else "write"), "write_failed"
         try:
-            if is_clock and not response:
-                raise BLEStepError("clock sync write", "unsupported_model", "Clock requires acknowledged write")
             _LOGGER.debug("%s [%s]: BLE write uuid=%s handle=%s properties=%s response=%s bytes=%s",
                           self.name, self.address, self._write_char.uuid,
                           self._write_char.handle, self._write_char.properties, response, command.hex())
             async with asyncio.timeout(GATT_TIMEOUT):
-                # The app sends the 21-byte calendar whole after requesting MTU
-                # 247. An acknowledged public Bleak write supports up to 512
-                # bytes; let the OS handle ATT, not arbitrary 20+1 app chunks.
-                chunk_size = len(command) if is_clock else 20
+                max_pdu = max(20, self._negotiated_mtu - 3)
+                chunk_size = len(command) if (is_clock or response or len(command) <= max_pdu) else max_pdu
                 if is_clock:
                     _LOGGER.debug("%s: BLE clock sync single acknowledged write length=%s",
                                   self.name, len(command))
@@ -746,6 +855,8 @@ class ACInfinityController:
             if (read is not None and write is not None
                     and {"notify", "indicate"}.intersection(read.properties)
                     and {"write", "write-without-response"}.intersection(write.properties)):
+                validate_not_ota_endpoint(read)
+                validate_not_ota_endpoint(write)
                 self._read_char, self._write_char = read, write
                 _LOGGER.debug("%s: BLE selected notify=%s write=%s", self.name, read.uuid, write.uuid)
                 return True

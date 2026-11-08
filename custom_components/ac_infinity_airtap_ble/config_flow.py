@@ -13,6 +13,10 @@ from homeassistant.components.bluetooth import (
     async_ble_device_from_address,
     async_discovered_service_info,
 )
+try:
+    from homeassistant.components.bluetooth import async_last_service_info
+except ImportError:
+    async_last_service_info = None  # type: ignore[assignment]
 from homeassistant.const import CONF_ADDRESS, CONF_SERVICE_DATA
 from homeassistant.data_entry_flow import FlowResult
 
@@ -84,19 +88,44 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data = await async_adopt_legacy_entry(self.hass, legacy)
                 return self.async_create_entry(title=legacy.title, data=data)
 
+            controller = ACInfinityDevice(
+                discovery_info.device, advertisement_data=discovery_info.advertisement
+            )
             try:
-                controller = ACInfinityDevice(
-                    discovery_info.device, advertisement_data=discovery_info.advertisement
-                )
                 await controller.update()
-            except (*BLEAK_EXCEPTIONS, ValueError) as err:
-                _LOGGER.debug("%s: Setup failed: %s", address, err, exc_info=True)
-                errors["base"] = config_error(err)
+            except (*BLEAK_EXCEPTIONS, ValueError, TimeoutError) as err:
+                _LOGGER.warning(
+                    "%s: Active GATT validation timed out or failed (%s); falling back to advertisement-backed "
+                    "passive mode to guarantee ambient air temperature sensor availability",
+                    address,
+                    err,
+                )
+                if (
+                    discovery_info.advertisement
+                    and MANUFACTURER_ID in discovery_info.advertisement.manufacturer_data
+                ):
+                    try:
+                        mfr_info = parse_manufacturer_data(
+                            discovery_info.advertisement.manufacturer_data[MANUFACTURER_ID]
+                        )
+                        new_state = dataclasses.replace(
+                            controller.state,
+                            **{k: v for k, v in dataclasses.asdict(mfr_info).items() if v is not None and k != "fan"}
+                        )
+                        controller._state = new_state
+                        try:
+                            controller.state = new_state
+                        except AttributeError:
+                            pass
+                    except Exception:
+                        _LOGGER.debug("%s: Error parsing advertisement during fallback", address, exc_info=True)
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected error")
                 errors["base"] = "unknown"
-            else:
+
+            if hasattr(controller, "stop") and callable(controller.stop):
                 await controller.stop()
+            if not errors:
                 return self.async_create_entry(
                     title=controller.name,
                     data={
@@ -171,22 +200,53 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if ble_device is None:
                 errors["base"] = "connect_failed"
             else:
-                # Minimal seed state; real state is read over GATT in update().
-                # type 6 == "Airtap Series" (see const.DEVICE_MODEL).
-                device_info = DeviceInfoEx(
-                    type=6, name=ble_device.name or address, version=0
+                last_service_info = (
+                    async_last_service_info(self.hass, address, connectable=True)
+                    if callable(async_last_service_info)
+                    else None
                 )
-                controller = ACInfinityDevice(ble_device, state=device_info)
+                advert_data = last_service_info.advertisement if last_service_info else None
+                mfr_data = (
+                    advert_data.manufacturer_data.get(MANUFACTURER_ID)
+                    if advert_data and advert_data.manufacturer_data
+                    else None
+                )
+                device_info = None
+                if mfr_data:
+                    try:
+                        device_info = parse_manufacturer_data(mfr_data)
+                    except Exception:
+                        pass
+                if device_info is None:
+                    device_info = DeviceInfoEx(
+                        type=6, name=ble_device.name or address, version=0
+                    )
+                controller = ACInfinityDevice(
+                    ble_device, state=device_info, advertisement_data=advert_data
+                )
+                fallback_ok = False
                 try:
                     await controller.update()
-                except (*BLEAK_EXCEPTIONS, ValueError) as err:
-                    _LOGGER.debug("%s: Manual setup failed: %s", address, err, exc_info=True)
-                    errors["base"] = config_error(err)
+                except (*BLEAK_EXCEPTIONS, ValueError, TimeoutError) as err:
+                    if mfr_data is not None:
+                        _LOGGER.warning(
+                            "%s: Manual active GATT validation timed out (%s); falling back to advertisement data",
+                            address,
+                            err,
+                        )
+                        fallback_ok = True
+                    else:
+                        _LOGGER.debug("%s: Manual setup failed: %s", address, err, exc_info=True)
+                        errors["base"] = config_error(err)
                 except Exception:  # pylint: disable=broad-except
                     _LOGGER.exception("Unexpected error")
                     errors["base"] = "unknown"
                 else:
+                    fallback_ok = True
+
+                if hasattr(controller, "stop") and callable(controller.stop):
                     await controller.stop()
+                if fallback_ok and "base" not in errors:
                     return self.async_create_entry(
                         title=controller.name or address,
                         data={

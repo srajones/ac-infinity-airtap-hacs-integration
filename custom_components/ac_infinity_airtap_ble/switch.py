@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import slugify
 
-from .const import DEVICE_MODEL, DOMAIN, MANUFACTURER
+from .const import DOMAIN, MANUFACTURER, get_device_model_name
 from .coordinator import (ACInfinityDataUpdateCoordinator,
                           ActiveBluetoothCoordinatorEntity)
 from .device import ACInfinityDevice
@@ -54,7 +54,7 @@ class ACInfinityDisplaySwitch(
         self._attr_unique_id = f"{self._device.address}_{slugify(name)}"
         self._attr_device_info = DeviceInfo(
             name=device.name,
-            model=DEVICE_MODEL[device.state.type],
+            model=get_device_model_name(device.state.type),
             manufacturer=MANUFACTURER,
             sw_version=str(device.state.version),
             connections={(dr.CONNECTION_BLUETOOTH, device.address)},

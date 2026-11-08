@@ -16,11 +16,12 @@ from homeassistant.util.percentage import (int_states_in_range,
                                            percentage_to_ranged_value,
                                            ranged_value_to_percentage)
 
-from .const import DEVICE_MODEL, DOMAIN, MANUFACTURER
+from .const import DOMAIN, MANUFACTURER, get_device_model_name
 from .coordinator import (ACInfinityDataUpdateCoordinator,
                           ActiveBluetoothCoordinatorEntity)
 from .device import ACInfinityDevice
 from .models import ACInfinityData
+from .vendor.ac_infinity_ble.protocol import get_mode
 
 SPEED_RANGE = (1, 10)
 PRESET_AUTO = "Auto"
@@ -62,7 +63,7 @@ class ACInfinityFan(
         self._attr_unique_id = f"{self._device.address}_{slugify(name)}"
         self._attr_device_info = DeviceInfo(
             name=device.name,
-            model=DEVICE_MODEL[device.state.type],
+            model=get_device_model_name(device.state.type),
             manufacturer=MANUFACTURER,
             sw_version=str(device.state.version),
             connections={(dr.CONNECTION_BLUETOOTH, device.address)},
@@ -135,3 +136,27 @@ class ACInfinityFan(
         """Handle updated data from the coordinator."""
         self._update_attrs()
         super()._handle_coordinator_update()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return device-specific operational and diagnostic attributes."""
+        state = self._device.state
+        attrs: dict[str, Any] = {}
+        if state.work_type is not None:
+            attrs["mode"] = get_mode(state.work_type)
+            attrs["work_type"] = state.work_type
+        if state.current_speed is not None:
+            attrs["current_speed"] = state.current_speed
+        if state.level_on is not None:
+            attrs["on_speed"] = state.level_on
+        if state.level_off is not None:
+            attrs["off_speed"] = state.level_off
+        if state.unit_celsius is not None:
+            attrs["unit_celsius"] = state.unit_celsius
+        if state.display_on is not None:
+            attrs["display_on"] = state.display_on
+        if state.display_brightness is not None:
+            attrs["display_brightness"] = self._device.display_brightness_level
+        if getattr(self._device, "firmware_revision", None):
+            attrs["firmware_revision"] = self._device.firmware_revision
+        return attrs

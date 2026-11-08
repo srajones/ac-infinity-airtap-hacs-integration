@@ -7,15 +7,15 @@ from .util import crc16, get_bit, get_bits, get_short
 def get_type(type: int) -> str:
     if type == 2:
         return "B"
-    if type in [3, 4, 5, 14, 15]:
+    if type in [3, 4, 5, 14, 15, 24, 25]:
         return "C"
-    if type == 6:
+    if type in [6, 48]:
         return "D"
     if type in [7, 8]:
         return "E"
-    if type in [9, 12]:
+    if type in [9, 12, 16, 17]:
         return "F"
-    if type == 11:
+    if type in [11, 18, 20]:
         return "G"
     return "A"
 
@@ -49,12 +49,13 @@ def get_mode(mode: int) -> str:
 
 
 def parse_manufacturer_data(data: bytes) -> DeviceInfo:
-    if len(data) < 19 or (data[11] >= 3 and data[12] in [7, 9, 11, 12] and len(data) < 23):
+    if len(data) < 19 or (data[11] >= 3 and data[12] in [7, 8, 9, 11, 12, 16, 17, 18, 20] and len(data) < 23):
         raise ValueError("Truncated AC Infinity manufacturer data")
+    raw_name = data[6:11].decode('ascii', errors='replace').strip('\x00')
     device = DeviceInfo(
         type=data[12],
         version=data[11],
-        name=f"{get_type(data[12])}-{data[6:11].decode('ascii')}",
+        name=f"{get_type(data[12])}-{raw_name}",
         is_degree=True ^ get_bit(data[13], 1),
         fan_state=get_bits(data[13], 2, 2),
         tmp_state=get_bits(data[13], 4, 2),
@@ -63,7 +64,7 @@ def parse_manufacturer_data(data: bytes) -> DeviceInfo:
         hum=get_short(data, 16) / 100,
         fan=data[18],
     )
-    if device.version >= 3 and device.type in [7, 9, 11, 12]:
+    if len(data) >= 23 and (device.version >= 3 or device.type in [7, 8, 9, 11, 12, 16, 17, 18, 20]):
         device.choose_port = data[19]
         device.vpd_state = get_bits(data[20], 0, 2)
         device.vpd = get_short(data, 21) / 100

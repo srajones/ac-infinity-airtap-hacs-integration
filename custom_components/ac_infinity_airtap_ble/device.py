@@ -136,8 +136,11 @@ class ACInfinityDevice(ACInfinityController):
         )
 
         if self._state.type not in DEVICE_MODEL:
-            raise BLEStepError("model identification", "unsupported_model",
-                               f"Unsupported device model type {self._state.type}")
+            raise BLEStepError(
+                "model identification",
+                "unsupported_model",
+                f"Unsupported device model type {self._state.type}",
+            )
         if not isinstance(self._state, DeviceInfoEx):
             self._state = DeviceInfoEx(**self._state.__dict__)
 
@@ -195,14 +198,13 @@ class ACInfinityDevice(ACInfinityController):
         """
         _LOGGER.debug("%s: BLE RX sender=%s bytes=%s diagnostic_read=%s",
                       self.name, _sender, data.hex(), self._diagnostic_read_label)
-        # Status pushes arrive about once a second, so only a command reply (A5) may
-        # resolve the future, or a read could get a status frame back instead.
-        if self._accept_command_notification(data):
-            return
-        # Unsolicited status push: update environment readings only (never
-        # work_type/fan, which this frame does not reliably carry here).
-        if self._parse_status_frame(data):
-            self._fire_callbacks(CallbackType.NOTIFICATION)
+        try:
+            if self._accept_command_notification(data):
+                return
+            if self._parse_status_frame(data):
+                self._fire_callbacks(CallbackType.NOTIFICATION)
+        except Exception:
+            _LOGGER.debug("%s: Error in notification processing", self.name, exc_info=True)
 
     def _parse_status_frame(self, data: bytes) -> bool:
         """Parse the AirTap 0x1EFF status frame for environment readings.
@@ -214,7 +216,9 @@ class ACInfinityDevice(ACInfinityController):
         confirms alignment. Does NOT touch work_type/fan, so commanded on/off
         state stays authoritative. Returns True if a status frame was seen.
         """
-        if len(data) >= 16 and data[0] == 0x1E and data[1] == 0xFF:
+        if len(data) < 16 or data[0] != 0x1E or data[1] != 0xFF:
+            return False
+        try:
             self.state.tmp = get_short(data, 8) / 100
             self.state.hum = get_short(data, 10) / 100
             self.state.vpd = get_short(data, 12) / 100
@@ -223,7 +227,8 @@ class ACInfinityDevice(ACInfinityController):
                 self.state.hum,
             )
             return True
-        return False
+        except (ValueError, IndexError):
+            return False
 
     @contextlib.asynccontextmanager
     async def _command_turn(self) -> AsyncIterator[None]:
@@ -436,6 +441,14 @@ class ACInfinityDevice(ACInfinityController):
         self._state.level_off = speed
         await self._send_setting([0x11, 1, speed])
 
+    async def set_on_speed(self, speed: int) -> None:
+        """Set the speed the vent runs at in on mode (key 0x12)."""
+        if speed not in range(1, 11):
+            raise ValueError("on speed must be between 1 and 10")
+        _LOGGER.debug("%s: Set on speed %s", self.name, speed)
+        self._state.level_on = speed
+        await self._send_setting([0x12, 1, speed])
+
     async def set_temperature_unit(self, celsius: bool) -> None:
         """Set the unit the vent displays (key 0x20)."""
         _LOGGER.debug("%s: Set unit %s", self.name, "C" if celsius else "F")
@@ -588,6 +601,26 @@ class ACInfinityDevice(ACInfinityController):
         """Commanded display brightness as UI level 1-5 (None until first set)."""
         b = self._state.display_brightness
         return BRIGHTNESS_BYTE_TO_LEVEL.get(b) if b is not None else None
+
+    @property
+    def firmware_revision(self) -> str | None:
+        return getattr(self, "_firmware_revision", None)
+
+    @property
+    def hardware_revision(self) -> str | None:
+        return getattr(self, "_hardware_revision", None)
+
+    @property
+    def software_revision(self) -> str | None:
+        return getattr(self, "_software_revision", None)
+
+    @property
+    def rssi(self) -> int | None:
+        if self._advertisement_data and self._advertisement_data.rssi is not None:
+            return self._advertisement_data.rssi
+        if hasattr(self._ble_device, "rssi") and self._ble_device.rssi is not None:
+            return self._ble_device.rssi
+        return None
 
     @property
     def state(self) -> DeviceInfoEx:

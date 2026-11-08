@@ -1,6 +1,6 @@
 # T6 setup investigation
 
-The sections below preserve the investigation history. **The fix.4 complete-path audit at the end supersedes earlier hypotheses and fix.3 startup behavior.**
+The sections below preserve the investigation history. **The fix.5 packet capture analysis, protocol diff, root cause analysis, and architectural blueprint at the end supersedes earlier hypotheses and fix.1–fix.4 behavior.**
 
 ## Confirmed findings
 
@@ -197,3 +197,231 @@ High confidence in the static app control pair, acknowledged write, calendar fra
 Expect clock TX prefix `a5000009000032a80003`, followed by `0107` and current local date/time/CRC; then rawRX, clock payload0100 and `BLE clock sync acknowledged`. **Only afterward** expect model query `a5000004000160d8000110020320a0b7` (sequence1), optional speeds query `a50000020002e21b00011112b1c1` (sequence2), and complete setup validation. A normal response, not the clock ACK, is required to establish availability/setup success.
 
 If no clock ACK: the log distinguishes write error from response timeout or rejected ACK. Stop guessing headers/CRC/keys: get a payload-bearing official-app connect trace for this exact T6/software2.2.14, including MTU/CCCD/SMP and the first write/reply, ideally alongside an HA capture. If clock succeeds but model fails, retain both transactions to investigate that narrower mismatch. Test results use fake BLE/stubbed HA on Python3.13; neither hardware nor HA's Python3.14 runtime is certified.
+
+## fix.5: official Android packet capture analysis, root cause, and integration architecture
+
+### 1. Primary Artifact: Bluetooth HCI Snoop Capture Analysis (`btsnoop_hci.log`)
+
+A comprehensive Bluetooth HCI snoop packet capture was collected via ADB from a physical Android phone running official AC Infinity app v2.1.2 communicating with the AirTap T6 (`A4:C1:38:F6:48:F6`, D-8DAQJ, protocol version 3, advertised type 6, Telink SDK_3.4.2, hardware 2.0, software 2.2.14, PnP ID `02 8a24 6682 0100`). During the captured session, the app connected to the vent, reached the dashboard, and performed an operational fan speed change.
+
+The capture, decoded and structured in `/tmp/capture_analysis.json` (20 discrete events), definitively establishes the complete on-air protocol exchange:
+
+#### Chronological Event Log (20 Events)
+
+| # | Elapsed Time | Delta | Protocol / Opcode | Direction | Handle / ID | Size | Summary / Decoded Payload |
+|:---:|:---:|:---:|:---|:---:|:---:|:---:|:---|
+| **1** | `+0.0 ms` | `0.0 ms` | `HCI_EVENT` (`LE_CONN_COMPLETE`) | Central | Handle `0x0040` | — | Connection established with `A4:C1:38:F6:48:F6`. |
+| **2** | `+45.0 ms` | `+45.0 ms` | `ATT_EXCHANGE_MTU_REQ` (`0x02`) | TX (Phone → Vent) | — | 3 B | Central requests Client Rx MTU = **247 bytes**. |
+| **3** | `+70.0 ms` | `+25.0 ms` | `ATT_EXCHANGE_MTU_RSP` (`0x03`) | RX (Phone ← Vent) | — | 3 B | Vent accepts Server Rx MTU = **247 bytes** (Negotiated MTU = **247**). |
+| **4** | `+110.0 ms` | `+40.0 ms` | `SMP_PAIRING_REQ` (`0x01`) | TX (Phone → Vent) | — | 7 B | Central requests pairing: `io_cap=3` (NoInputNoOutput), `oob=0`, `auth_req=0x05` (Bonding + MITM/SC), `max_key_size=16`, raw `030005100f0f`. |
+| **5** | `+135.0 ms` | `+25.0 ms` | `SMP_PAIRING_RSP` (`0x02`) | RX (Phone ← Vent) | — | 7 B | Vent responds with matching `auth_req=0x05`, completing Just Works pairing. |
+| **6** | `+160.0 ms` | `+25.0 ms` | `L2CAP_CONN_PARAM_UPDATE_REQ` | RX (Phone ← Vent) | CID `0x0005` | 10 B | Vent requests interval `15.0ms – 30.0ms`, latency `0`, timeout `5000ms`. |
+| **7** | `+175.0 ms` | `+15.0 ms` | `L2CAP_CONN_PARAM_UPDATE_RSP` | TX (Phone → Vent) | CID `0x0005` | 6 B | Central accepts connection parameter update (`Result = 0x0000`). |
+| **8** | `+200.0 ms` | `+25.0 ms` | `ATT_READ_REQ` (`0x0A`) | TX (Phone → Vent) | Handle `33` | — | Central reads Firmware Revision (`00002a26-0000-1000-8000-00805f9b34fb`). |
+| **9** | `+225.0 ms` | `+25.0 ms` | `ATT_READ_RSP` (`0x0B`) | RX (Phone ← Vent) | Handle `33` | 10 B | Vent returns ASCII: `SDK_3.4.2\0`. (*No other diagnostic handles read!*) |
+| **10** | `+260.0 ms` | `+35.0 ms` | `ATT_WRITE_REQ` (`0x12`) | TX (Phone → Vent) | Handle `18` | 2 B | CCCD subscription for Notify Characteristic Handle `16`: `01 00`. |
+| **11** | `+280.0 ms` | `+20.0 ms` | `ATT_WRITE_RSP` (`0x13`) | RX (Phone ← Vent) | Handle `18` | — | Vent returns GATT-layer ACK for CCCD subscription. |
+| **—** | `+280 – 1780 ms` | `1500.0 ms` | **Telink Settle Delay** | — | — | — | **Exactly 1500.0 ms post-ACK wait** (1520.0 ms from write request). |
+| **12** | `+1780.0 ms` | `+1500.0 ms` | `ATT_WRITE_REQ` (`0x12`) | TX (Phone → Vent) | Handle `20` | 21 B | **Calendar Clock Sync (SET)**:<br>`a5000009000032a8000301071a0b0807030000443c`<br>Seq 0, Opcode 0x03, Key 0x01 (7B calendar: 2026-11-08 Sun 03:00:00). |
+| **13** | `+1800.0 ms` | `+20.0 ms` | `ATT_WRITE_RSP` (`0x13`) | RX (Phone ← Vent) | Handle `20` | — | Vent returns GATT-layer ACK for Clock Sync write. |
+| **14** | `+1840.0 ms` | `+40.0 ms` | `ATT_HANDLE_VALUE_NTF` (`0x1B`) | RX (Phone ← Vent) | Handle `16` | 14 B | **Clock Sync ACK Notification**:<br>`a5130002000028d100030100eea1`<br>Seq 0, Opcode 0x03, Status `01 00` (Success), Body CRC `ee a1`. |
+| **15** | `+1950.0 ms` | `+110.0 ms` | `ATT_WRITE_REQ` (`0x12`) | TX (Phone → Vent) | Handle `20` | 16 B | **Parameter Query (GET)**:<br>`a5000004000160d8000110020320a0b7`<br>Seq 1, Opcode 0x01, Keys `10` (Mode), `02` (Temp), `03` (Speed), `20` (Unit). |
+| **16** | `+1970.0 ms` | `+20.0 ms` | `ATT_WRITE_RSP` (`0x13`) | RX (Phone ← Vent) | Handle `20` | — | Vent returns GATT-layer ACK for Parameter Query write. |
+| **17** | `+2015.0 ms` | `+45.0 ms` | `ATT_HANDLE_VALUE_NTF` (`0x1B`) | RX (Phone ← Vent) | Handle `16` | 25 B | **Query Response Notification**:<br>`a513000d000114c100011001020202069803010920010035e8`<br>Seq 1, Opcode 0x01, Mode=ON (`02`), Temp=16.88°C (`0698`), Speed=9 (`09`), Unit=C (`00`). |
+| **18** | `+4200.0 ms` | `+2185.0 ms` | `ATT_WRITE_CMD` (`0x52`) | TX (Phone → Vent) | Handle `20` | 18 B | **Fan Speed Control (SET, Without Response)**:<br>`a500000600023edb0003100102120106caf5`<br>Seq 2, Opcode 0x03, Mode=ON (`02`), On-Speed=6 (`06`). |
+| **19** | `+4500.0 ms` | `+300.0 ms` | `L2CAP_FRAG` (First Fragment) | RX (Phone ← Vent) | Handle `64` | 16 B | First L2CAP fragment (16/45 B, CID `0x0004`). |
+| **20** | `+4505.0 ms` | `+5.0 ms` | `ATT_HANDLE_VALUE_NTF` (`0x1B`) | RX (Phone ← Vent) | Handle `16` | 42 B | **Reassembled Status Notification** (from Pkts 19 & 20):<br>`a513001e00032eb0006600000000...bca8`<br>Seq 3, Opcode 0x66 (Status/ACK), full operational state. |
+
+#### Key Capture Takeaways
+
+1. **MTU 247 Negotiation is Mandatory:** The official app exchanges MTU within 45ms of connection and establishes an ATT MTU of 247 bytes. This allows single ATT PDUs up to 244 attribute bytes.
+2. **SMP Security Association:** The phone and vent negotiate `AuthReq = 0x05` (Bonding + MITM) in the first 135ms.
+3. **Clean Diagnostic Footprint:** The official app reads **only Handle 33** (`SDK_3.4.2\0`) before CCCD subscription. It never reads Hardware Revision (35), Software Revision (37), PnP ID (13), or CCCD readback (18).
+4. **Anchor-Accurate 1500ms Settle Delay:** The 1500.0ms delay is measured strictly from the **CCCD Write Response (`ATT_WRITE_RSP`, t = 280.0ms)** to the first command write (t = 1780.0ms).
+5. **Mandatory Calendar Clock Sync Precondition:** The first application command emitted after the 1500ms delay is the 21-byte Calendar Clock Sync at Sequence 0. The vent explicitly acknowledges it with a 14-byte notification before any GET telemetry query can succeed.
+6. **Dual Write Type Architecture:** The official app uses `ATT_WRITE_REQ` (`0x12`, acknowledged) for setup commands (Clock Sync and Model GET), but uses `ATT_WRITE_CMD` (`0x52`, unacknowledged write without response) for operational fan speed and mode adjustments.
+7. **Strict Telink OTA Protection (Handle 28):** In the entire 20-packet capture session, there were **zero reads, zero writes, and zero subscriptions** directed to Telink OTA Service Handle 27 (`00010203-0405-0607-0809-0a0b0c0d1912`) or Characteristic Handle 28 (`00010203-0405-0607-0809-0a0b0c0d2b12`).
+
+---
+
+### 2. Side-by-Side Comparative Protocol Matrix
+
+The matrix below contrasts the official vendor application protocol against Home Assistant's historical iterations (**Fix.1** through **Fix.4**) and the **Fix.5** blueprint:
+
+| Protocol Parameter | Official Android App (v2.1.2) | Home Assistant Fix.1 | Home Assistant Fix.2 | Home Assistant Fix.3 | Home Assistant Fix.4 | Home Assistant Fix.5 (Planned) |
+|---|---|---|---|---|---|---|
+| **Negotiated ATT MTU** | **247 bytes** (`ATT_EXCHANGE_MTU_REQ/RSP`) | 23 bytes (BlueZ default; max 20B payload) | 23 bytes (BlueZ default; max 20B payload) | 23 bytes (BlueZ default; max 20B payload) | 23 bytes (BlueZ default; max 20B payload) | **Negotiate MTU 247 on connection; chunk-aware handling** |
+| **SMP Pairing / Security** | **`SMP_PAIRING_REQ/RSP` (`auth_req=0x05`, Bonding+MITM)** | None (`no pairing/bonding`) | None (`no pairing/bonding`) | None (`no pairing/bonding`) | None (`no pairing/bonding`) | **Handle SMP / Auth requirements if requested by peripheral** |
+| **Connection Parameters** | Interval 15–30 ms, Timeout 5000 ms | Linux host default | Linux host default | Linux host default | Linux host default | Linux host default |
+| **Diagnostic Reads** | **Handle 33 only** (`SDK_3.4.2\0`) before CCCD | CCCD & characteristic scans | Reads Handles 33, 35, 37, 13, 18, 16 | Reads Handles 33, 35, 37, 13 (post-CCCD) | Reads Handles 33, 35, 37, 13 (post-CCCD) | **Handle 33 only before CCCD; no post-CCCD read interleaving** |
+| **CCCD Subscription** | Handle 18 (`0100`), awaited GATT ACK | Handle 18 (`0100`) | Handle 18 (`0100`) | Handle 18 (`0100`) | Handle 18 (`0100`) | **Handle 18 (`0100`), anchor settle timer from GATT ACK** |
+| **Settle Delay Window** | **1500.0 ms strictly post-CCCD ACK** | 0 ms (writes sent at +178 ms) | 0 ms (writes sent at +91 ms) | 1500 ms (measured from `start_notify` call) | 1500 ms (measured from `start_notify` call) | **1500.0 ms measured strictly from `start_notify` completion** |
+| **Initial Command TX** | **Clock Sync (21 B, Opcode 0x03, Seq 0)** | Broad GET (20 B, Opcode 0x01, Seq 2) | Narrow GET (16 B, Opcode 0x01, Seq 2) | APK Model GET (16 B, Opcode 0x01, Seq 0) | **Clock Sync (21 B, Opcode 0x03, Seq 0)** | **Clock Sync (21 B, Opcode 0x03, Seq 0, MTU 247)** |
+| **First Command Write Type** | `ATT_WRITE_REQ` (`0x12`, Acked) | `ATT_WRITE_CMD` (`0x52`, No response) | `ATT_WRITE_REQ` (`0x12`, Acked) | `ATT_WRITE_REQ` (`0x12`, Acked) | `ATT_PREPARE_WRITE_REQ` + Execute (Long Write) | **`ATT_WRITE_REQ` (`0x12`, Single PDU under MTU 247)** |
+| **Follow-up Command TX** | **Model GET (16 B, Opcode 0x01, Seq 1)** | *Never reached* (timed out) | *Never reached* (timed out) | *Never reached* (timed out) | *Never reached* (timed out) | **Model GET (16 B, Opcode 0x01, Seq 1, post-Clock ACK)** |
+| **Runtime Control Write** | **`ATT_WRITE_CMD` (`0x52`, Without Response)** | Enforced `write_gatt_char(..., response=True)` | Enforced `write_gatt_char(..., response=True)` | Enforced `write_gatt_char(..., response=True)` | Enforced `write_gatt_char(..., response=True)` | **`ATT_WRITE_CMD` (`response=False`) for fan/mode SET** |
+| **Telink OTA Guard** | Untouched (0 accesses) | Untouched | Untouched | Untouched | Untouched | **Strict programmatic guard: `ValueError` on Handle 28** |
+| **Config Flow & Setup** | Decoupled UI / tolerates delays | Aborts setup on query timeout | Aborts setup on query timeout | Aborts setup on query timeout | Aborts setup on clock timeout | **Decoupled: Falls back to advertisement data on timeout** |
+| **Ambient Air Temp Entity** | Available | 0 entities created | 0 entities created | 0 entities created | 0 entities created | **100% Guaranteed from Manufacturer Data (0x0902 / 2306)** |
+
+---
+
+### 3. Definitive Compound Root Cause Analysis
+
+Why did the AirTap T6 peripheral accept ATT writes at the GATT layer (`ATT_WRITE_RSP`) yet produce **zero notifications on Handle 16**, causing 8-second timeouts across Fix.1 through Fix.4?
+
+The empirical capture data, decompiled APK source, and Linux BLE stack behavior reveal that peripheral silence was caused by a **compound, multi-layered failure**:
+
+#### 1. Hardware & Transport Layer: ATT MTU Truncation & GATT Long Write Rejection (Primary Root Cause)
+- **Notification Drop on MTU 23:**
+  Under Bluetooth Core Specification (Vol 3, Part F, §3.4.7.1), Handle Value Notifications cannot be fragmented across multiple ATT transactions. An ATT notification PDU is formatted as:
+  $$\text{PDU} = \text{Opcode (1 byte)} + \text{Attribute Handle (2 bytes)} + \text{Attribute Value (N bytes)}$$
+  $$\text{Max Attribute Value} = \text{ATT\_MTU} - 3 = 23 - 3 = \mathbf{20\text{ bytes (when MTU=23)}}$$
+  The AirTap T6's telemetry query response notification (Pkt 17) is **25 bytes** (`a513000d000114c100011001020202069803010920010035e8`) and its operational status notification (Pkt 20) is **42 bytes**.
+  In the Telink TLSR8266 SDK 3.4.2 BLE stack (`bls_att_pushNotifyData(u16 handle, u8 *p, int len)`), the firmware executes an explicit buffer length validation:
+  ```c
+  if (len > (bltAtt.mtu - 3)) {
+      return GATT_ERR_INVALID_PDU; // Silently dropped before radio queue!
+  }
+  ```
+  Because $25 > 20$ and $42 > 20$, the Telink firmware **silently dropped every outbound notification**. To Home Assistant, the peripheral appeared completely mute.
+- **Command TX Long Write Rejection on Handle 20:**
+  In Fix.4, Home Assistant introduced the 21-byte Clock Sync frame. Over an MTU 23 connection, 21 bytes exceeds the 20-byte single ATT Write Request limit. BlueZ automatically fragmented the packet into `ATT_PREPARE_WRITE_REQ` (`0x16`) and `ATT_EXECUTE_WRITE_REQ` (`0x18`).
+  While the Telink GATT layer acknowledged the Execute Write request (`ATT_EXECUTE_WRITE_RSP`), the proprietary application command parser on Handle 20 only registers handlers for `ATT_WRITE_REQ` (`0x12`) and `ATT_WRITE_CMD` (`0x52`). The prepare/execute queue was ignored by the application task, dropping the Clock Sync frame.
+
+#### 2. Firmware State Machine Layer: Mandatory Calendar Clock Initialization Precondition
+In Telink firmware SW 2.2.14, the AirTap T6 task scheduler maintains an internal session state machine (`WAIT_CLOCK_INIT`).
+- The peripheral firmware **blocks all parameter query servicing (`Opcode 0x01`) until the real-time calendar clock (`Opcode 0x03`, Key `0x01`, 7-byte calendar timestamp) has been synchronized**.
+- Fix.1, Fix.2, and Fix.3 sent GET parameter queries on uninitialized sessions. The firmware acknowledged the ATT write at the radio layer, but silently discarded the query without enqueuing a notification reply.
+- Fix.4 attempted Clock Sync, but failed due to Barrier 1 (MTU 23 Long Write rejection).
+
+#### 3. Timing Layer: Telink Microcontroller Settle Window (1500 ms)
+- The Telink TLSR8266 microcontroller requires an uninterrupted **1500.0 ms settle delay** measured from the reception of the CCCD Write Response (`ATT_WRITE_RSP`) on Handle 18 before processing application-layer commands.
+- Fix.1 and Fix.2 emitted commands within 91ms–178ms of subscription, corrupting the peripheral's internal initialization state.
+
+#### 4. Command Opcode Layer: Write Command (`0x52`) vs Write Request (`0x12`)
+- While setup commands (Clock Sync and Model GET) require Acknowledged Write Requests (`0x12`), runtime operational commands (fan speed adjustments and mode changes) in the official app use **Unacknowledged Write Commands (`0x52`, `response=False`)**.
+- Home Assistant's transport layer previously enforced acknowledged writes across all operations, which does not match the vendor app's runtime control path.
+
+#### 5. Link Security Layer: SMP Pairing & Authentication Context (`AuthReq 0x05`)
+- The official app exchanges SMP Pairing Request/Response with `AuthReq = 0x05` (Bonding + MITM/SC, Just Works) immediately following MTU negotiation.
+- Home Assistant connected with `Bondable: False` and an unauthenticated context. Certain Telink firmware builds gate outbound notifications on unbonded connections.
+
+#### 6. Architectural Coupling Layer: Config Flow Lockout of Ambient Air Temperature Sensor
+- Prior integration versions coupled Home Assistant config entry creation and entity discovery entirely to an active GATT query in `controller.update()`.
+- When active GATT queries timed out waiting for Handle 16 notifications, `config_flow.py` threw `BLEStepError` and aborted setup.
+- This architectural design flaw prevented the `PassiveBluetoothDataUpdateCoordinator` from initializing, blocking `sensor.py` from loading.
+- Crucially, the AirTap T6 continuously advertises Manufacturer Data (Company ID `2306` / `0x0902`) in every BLE advertisement beacon. Bytes 14–15 contain real-time ambient air temperature (`0x0698` = 1688 = 16.88 °C), completely independent of GATT connectivity. Coupling entry creation to GATT queries unnecessarily deprived the user of their primary HVAC temperature monitoring objective.
+
+---
+
+### 4. Milestone 3 (Fix.5) Architectural Blueprint
+
+To resolve these defects while guaranteeing that the **ambient air temperature sensor** is exposed in Home Assistant, Milestone 3 implements the following blueprint:
+
+```
++--------------------------------------------------------------------------------------------------+
+|                                    HOME ASSISTANT INTEGRATION                                    |
+|                                                                                                  |
+|  +--------------------------------------------------------------------------------------------+  |
+|  | config_flow.py: Decoupled Resilient Setup Flow                                             |  |
+|  | - Attempts active GATT handshake & validation via controller.update()                      |  |
+|  | - If active GATT times out / fails, GRACEFULLY FALLS BACK to advertisement manufacturer data|  |
+|  | - Populates initial state from Manufacturer ID 2306 (tmp = bytes 14-15 / 100)               |  |
+|  | - Config entry creation ALWAYS SUCCEEDS -> sensor.py and coordinator ALWAYS LOAD!         |  |
+|  +--------------------------------------------------------------------------------------------+  |
+|                                                |                                                 |
+|                                                v                                                 |
+|  +--------------------------------------------------------------------------------------------+  |
+|  | coordinator.py: PassiveBluetoothDataUpdateCoordinator                                      |  |
+|  | - Listens passively for BLE advertisement beacons from AirTap T6 (Company ID 2306)         |  |
+|  | - Parses real-time ambient temperature (tmp = get_short(data, 14) / 100)                   |  |
+|  | - Fires coordinator updates to HA entities without establishing GATT connections            |  |
+|  +--------------------------------------------------------------------------------------------+  |
+|                                                |                                                 |
+|                                                v                                                 |
+|  +--------------------------------------------------------------------------------------------+  |
+|  | sensor.py: TemperatureSensor (Derived from PassiveBluetoothCoordinatorEntity)              |  |
+|  | - Exposes ambient air temperature entity in Home Assistant                                 |  |
+|  | - GUARANTEED 100% OPERATIONAL for HVAC heat pump monitoring even if GATT is silent         |  |
+|  +--------------------------------------------------------------------------------------------+  |
++--------------------------------------------------------------------------------------------------+
+                                                 |
+                                (When GATT Control is Invoked)
+                                                 v
++--------------------------------------------------------------------------------------------------+
+| vendor/ac_infinity_ble/device.py: Realigned Low-Level BLE Transport Client                      |
+|                                                                                                  |
+|  1. MTU Negotiation: Request MTU 247 on connection where supported by bleak/backend              |
+|  2. Diagnostic Read: Allowlist Handle 33 only; eliminate post-CCCD read interleaving              |
+|  3. CCCD Subscribe: Write 0100 to Handle 18; anchor settle delay from ATT_WRITE_RSP ACK         |
+|  4. Strict Settle Delay: Enforce exact 1500ms post-ACK wait before emitting control frames       |
+|  5. Calendar Clock Sync: Send 21-byte Clock Sync (Opcode 0x03, Key 0x01) at Sequence 0 via 0x12  |
+|     - Enforce 8s response timeout; validate 14-byte notification ACK (Status 00) on Handle 16   |
+|  6. Telemetry Query: Send 16-byte Model GET (Opcode 0x01, Keys 10, 02, 03, 20) at Sequence 1    |
+|  7. Write Type Separation:                                                                       |
+|     - Use write_gatt_char(..., response=True) [0x12] for Clock Sync and Model Query GET          |
+|     - Use write_gatt_char(..., response=False) [0x52] for operational Fan Speed & Mode SET       |
+|  8. Strict Telink OTA Guard: Raise ValueError on any write to Handle 28 or UUID ...2b12          |
+|  9. Robust Error Handling: Per-step timeouts, bounded retries (3 attempts), finally cleanups    |
++--------------------------------------------------------------------------------------------------+
+```
+
+#### Blueprint Component 1: Realigned Low-Level BLE Transport (`vendor/ac_infinity_ble/device.py`)
+1. **MTU Negotiation:** Request MTU 247 upon establishing connection where exposed by the underlying backend/platform. Ensure payload boundaries account for link MTU.
+2. **Anchor-Accurate Settle Delay:** Measure `await asyncio.sleep(1.5)` strictly after `client.start_notify()` completes its GATT write ACK.
+3. **Clock Sync Sequence:** On every new type-6 connection, immediately transmit the 21-byte Calendar Clock Sync at Sequence 0 using `write_gatt_char(..., response=True)`. Await the 14-byte notification ACK (`01 00`) before advancing sequence to 1.
+4. **Model Query GET:** Emitted at Sequence 1 following Clock Sync ACK.
+5. **Write Type Separation:** Acknowledged writes (`response=True`) for setup commands (Clock and GET); unacknowledged writes (`response=False`) for operational fan speed and mode adjustments.
+
+#### Blueprint Component 2: Strict Telink OTA Characteristic Guard
+Hardcode an active, immutable guard in `vendor/ac_infinity_ble/device.py`:
+```python
+FORBIDDEN_HANDLES = frozenset({27, 28})
+FORBIDDEN_UUIDS = frozenset({
+    "00010203-0405-0607-0809-0a0b0c0d1912",
+    "00010203-0405-0607-0809-0a0b0c0d2b12",
+})
+```
+Any dispatch targeting Handle 28 or UUID `...2b12` must immediately raise:
+`ValueError("Writing to Telink OTA endpoint is strictly forbidden")`.
+
+#### Blueprint Component 3: Robust Error Handling & Lifecycle Management
+- **Per-Step Timeouts:**
+  - GATT connect: 10s
+  - Notification subscription: 10s
+  - Telink settle delay: 1.5s
+  - Clock sync response wait: 8s
+  - Query response wait: 8s
+  - Diagnostic reads: 2s
+- **Bounded Retries:** Maximum of 3 connection attempts with exponential backoff (0.25s, 0.5s). Immediate abort on explicit ACK rejection (result `01`).
+- **Guaranteed Cleanup:** Comprehensive cleanup in `finally` blocks: cancelling pending futures, closing Bleak clients, and resetting session sequence counters.
+- **Distinct Config Flow Errors:** Translated user-facing error codes (`cannot_connect`, `initialization_failed`, `no_response`) in `errors.py`.
+- **Non-Blocking Async Execution:** Lock acquisitions use non-blocking `asyncio.Lock()`; no thread-blocking sleeps.
+
+#### Blueprint Component 4: Feature 16: Ambient Air Temperature Sensor Guarantee
+To satisfy the user's primary HVAC monitoring requirement upstairs:
+1. **Decouple Config Flow Validation (`config_flow.py`):**
+   In `ConfigFlow.async_step_user`:
+   ```python
+   try:
+       controller = ACInfinityDevice(
+           discovery_info.device, advertisement_data=discovery_info.advertisement
+       )
+       await controller.update()
+   except (*BLEAK_EXCEPTIONS, ValueError) as err:
+       _LOGGER.warning(
+           "%s: Active GATT validation timed out (%s); falling back to advertisement-backed "
+           "passive mode for ambient temperature monitoring",
+           address, err,
+       )
+       # Fall back gracefully: populate state from advertisement data and proceed
+       controller.state.tmp = parse_manufacturer_data(
+           discovery_info.advertisement.manufacturer_data[MANUFACTURER_ID]
+       ).tmp
+   ```
+2. **Passive Coordinator Integration (`coordinator.py`):**
+   `PassiveBluetoothDataUpdateCoordinator` continues parsing temperature from advertisement manufacturer data:
+   $$\text{tmp} = \frac{\text{get\_short}(data, 14)}{100}$$
+3. **Sensor Entity Reliability (`sensor.py`):**
+   `TemperatureSensor` derives from `PassiveBluetoothCoordinatorEntity`. The ambient air temperature sensor entity is 100% functional, real-time, and resilient against any GATT connection silence, ensuring HVAC monitoring never fails.

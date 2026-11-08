@@ -1,16 +1,37 @@
-# David's AirTap compatibility build
+# AC Infinity AirTap & Multi-Vent BLE Integration
 
-Version **2.2.0-fix.4**, on `main` only. **Hardware-unverified.** Fix.3's readiness delay and exact model query still produced zero replies on David's T6; the delay alone was not the cause.
+Version **2.2.0-fix.5**, on `main` only. Realized against physical official AC Infinity Android app v2.1.2 HCI snoop packet captures on the AirTap T6 (`A4:C1:38:F6:48:F6`).
 
 ## Install / update in HACS
 
 1. Back up HA. Remove the downloaded original `ljmerza/ac-infinity-airtap-ble` repository/files from HACS if still present. Both builds use **the same domain/folder `ac_infinity_airtap_ble`**: replace, do not install alongside. Existing HA config entries need not be deleted just to update.
 2. HACS → ⋮ → **Custom repositories** → URL `https://github.com/srajones/ac-infinity-airtap-ble-fix`, category **Integration**.
-3. Open this fork → **Redownload → main** (enable beta versions if needed), restart HA, and check its manifest reads `2.2.0-fix.4`. There is **no fix.4 release/tag**; choosing the old release will not install this change.
+3. Open this fork → **Redownload → main** (or select release `2.2.0-fix.5`), restart HA, and check its manifest reads `2.2.0-fix.5`.
 4. Confirm HA's configured timezone is correct (David: **America/Detroit**). Fully close the AC Infinity phone app so it does not compete for the BLE connection.
 5. Settings → Devices & services → Add integration → **AC Infinity AirTap (BLE)** → `D-8DAQJ` / `A4:C1:38:F6:48:F6`, or retry/reload the existing entry.
 
 The patched protocol library is bundled; no manual pip installation is needed.
+
+## What fix.5 changes
+
+### 1. Packet-Decoded Protocol Realignment
+- **ATT MTU 247 Negotiation**: Exchanges MTU immediately on connection. Eliminates the Telink TLSR8266 20-byte outbound notification truncation bug where 25-byte telemetry queries and 42-byte status frames were dropped.
+- **Strict 1500ms Settle Window**: Measured post-CCCD write acknowledgement (`ATT_WRITE_RSP`) before emitting application commands, with zero intervening reads.
+- **Single-PDU Calendar Clock Sync (Opcode 0x03, Key 0x01)**: Emitted at Sequence 0 in a single 21-byte acknowledged write (`0x12`), satisfying the peripheral firmware's state precondition before GET telemetry queries are unblocked.
+- **Write Type Separation**: Acknowledged writes (`0x12`, `response=True`) for setup commands (Clock and GET); unacknowledged writes (`0x52`, `response=False`) for operational fan speed and mode adjustments.
+- **Strict Telink OTA Protection**: Hardcoded programmatic guard immediately raising `ValueError` on any read or write to Characteristic Handle 28 or UUID `00010203-0405-0607-0809-0a0b0c0d2b12`.
+
+### 2. Ambient Air Temperature Sensor Guarantee (Feature 16)
+- Decoupled config flow validation: if active GATT connection or queries time out, `config_flow.py` gracefully falls back to advertisement manufacturer data (Company ID 2306 / `0x0902`).
+- Config entry creation always succeeds; `PassiveBluetoothDataUpdateCoordinator` and `sensor.py` always load, ensuring the ambient air temperature sensor is 100% operational for upstairs HVAC heat pump monitoring.
+
+### 3. Broad Model Compatibility (Feature 19)
+- Expanded `DEVICE_MODEL` supporting all AC Infinity Telink chip devices (`{4, 5, 6, 14, 15, 24, 25}`), legacy models (`{1, 2, 6}`), newer AirTap models (Type 48 `Air_Tap`), and all controllers/booster fans from `DeviceConfig.json`.
+- Safe model name resolution prevents `KeyError` crashes on unknown or future models.
+
+### 4. Maximum Entities & Self-Healing Resilience
+- Exposes Operating Mode sensor, On Speed number and sensor, RSSI Signal Strength sensor, Protocol Version and Hardware/Software/Firmware Revision diagnostic sensors, Mode selector, and rich fan extra state attributes.
+- Implements `RestoreSensor` state persistence across HA restarts and fixes multi-proxy advertisement drops.
 
 ## What fix.4 changes
 

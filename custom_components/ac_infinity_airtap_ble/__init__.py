@@ -48,6 +48,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     device = ACInfinityDevice(ble_device, device_info,
                               protocol_variant=entry.data.get("protocol_variant"))
+    device.set_ble_device_callback(
+        lambda: bluetooth.async_ble_device_from_address(hass, address.upper(), connectable=True)
+    )
     coordinator = ACInfinityDataUpdateCoordinator(hass, _LOGGER, ble_device, device)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = ACInfinityData(
@@ -59,3 +62,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(coordinator.async_start())
 
     return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload an AC Infinity config entry cleanly with zero leaked resources."""
+    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        data: ACInfinityData = hass.data[DOMAIN].pop(entry.entry_id)
+        await data.device.stop()
+    return unload_ok

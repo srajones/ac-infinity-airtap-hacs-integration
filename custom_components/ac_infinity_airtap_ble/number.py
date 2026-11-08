@@ -13,7 +13,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import slugify
 
-from .const import DEVICE_MODEL, DOMAIN, MANUFACTURER
+from .const import DOMAIN, MANUFACTURER, get_device_model_name
 from .coordinator import (ACInfinityDataUpdateCoordinator,
                           ActiveBluetoothCoordinatorEntity)
 from .device import (AUTO_TRIGGER_RANGE_C, AUTO_TRIGGER_RANGE_F,
@@ -89,7 +89,10 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     data: ACInfinityData = hass.data[DOMAIN][entry.entry_id]
-    entities: list[ACInfinityNumber] = [ACInfinityOffSpeed(data.coordinator, data.device)]
+    entities: list[ACInfinityNumber] = [
+        ACInfinityOffSpeed(data.coordinator, data.device),
+        ACInfinityOnSpeed(data.coordinator, data.device),
+    ]
     entities += [
         ACInfinityTemperatureNumber(data.coordinator, data.device, description)
         for description in TEMPERATURE_NUMBERS
@@ -116,7 +119,7 @@ class ACInfinityNumber(
         self._attr_unique_id = f"{self._device.address}_{slugify(name)}"
         self._attr_device_info = DeviceInfo(
             name=device.name,
-            model=DEVICE_MODEL[device.state.type],
+            model=get_device_model_name(device.state.type),
             manufacturer=MANUFACTURER,
             sw_version=str(device.state.version),
             connections={(dr.CONNECTION_BLUETOOTH, device.address)},
@@ -174,6 +177,32 @@ class ACInfinityOffSpeed(ACInfinityNumber):
     @callback
     def _update_attrs(self) -> None:
         self._attr_native_value = self._device.state.level_off
+
+
+class ACInfinityOnSpeed(ACInfinityNumber):
+    """The speed the vent runs at in on mode (cmd-3 setting key 0x12)."""
+
+    _attr_icon = "mdi:fan-plus"
+    _attr_native_min_value = 1
+    _attr_native_max_value = 10
+
+    def __init__(
+        self, coordinator: ACInfinityDataUpdateCoordinator, device: ACInfinityDevice
+    ) -> None:
+        super().__init__(coordinator, device, "On Speed")
+
+    @callback
+    def _restore(self, value: int, unit: str | None) -> None:
+        if self._device.state.level_on is None:
+            self._device.state.level_on = value
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._device.set_on_speed(int(value))
+        self._write_state_from_device()
+
+    @callback
+    def _update_attrs(self) -> None:
+        self._attr_native_value = self._device.state.level_on
 
 
 class ACInfinityTemperatureNumber(ACInfinityNumber):
