@@ -1,17 +1,28 @@
 # David's AirTap compatibility build
 
-This fork is an **APK-derived compatibility build, hardware-unverified**, not a claim that the T6 connection failure is fixed. The first build was tested on the vent and still received zero notifications despite successful acknowledged writes. Version: `2.2.0-fix.3`.
+Version **2.2.0-fix.4**, on `main` only. **Hardware-unverified.** Fix.3's readiness delay and exact model query still produced zero replies on David's T6; the delay alone was not the cause.
 
-## Install this fork through HACS
+## Install / update in HACS
 
-1. Back up Home Assistant. In HACS, remove the downloaded original `ljmerza/ac-infinity-airtap-ble` repository/integration files. Do not keep two repositories managing the same integration folder. Existing HA configuration entries do not need deleting unless troubleshooting requires it.
-2. HACS → ⋮ → **Custom repositories** → add `https://github.com/srajones/ac-infinity-airtap-ble-fix`, category **Integration**.
-3. Download **AC Infinity AirTap (BLE)** from this fork. In HACS choose **Redownload → main** (enable beta versions if needed): fix.3 is on `main`, not a GitHub release/tag. Restart Home Assistant. Confirm the downloaded manifest version is `2.2.0-fix.3`.
-4. Settings → Devices & services → Add integration → **AC Infinity AirTap (BLE)** → select `D-8DAQJ` / `A4:C1:38:F6:48:F6`.
+1. Back up HA. Remove the downloaded original `ljmerza/ac-infinity-airtap-ble` repository/files from HACS if still present. Both builds use **the same domain/folder `ac_infinity_airtap_ble`**: replace, do not install alongside. Existing HA config entries need not be deleted just to update.
+2. HACS → ⋮ → **Custom repositories** → URL `https://github.com/srajones/ac-infinity-airtap-ble-fix`, category **Integration**.
+3. Open this fork → **Redownload → main** (enable beta versions if needed), restart HA, and check its manifest reads `2.2.0-fix.4`. There is **no fix.4 release/tag**; choosing the old release will not install this change.
+4. Confirm HA's configured timezone is correct (David: **America/Detroit**). Fully close the AC Infinity phone app so it does not compete for the BLE connection.
+5. Settings → Devices & services → Add integration → **AC Infinity AirTap (BLE)** → `D-8DAQJ` / `A4:C1:38:F6:48:F6`, or retry/reload the existing entry.
 
-Both repositories use domain/folder `ac_infinity_airtap_ble`; this **replaces**, rather than installs alongside, the original. No separate Python library installation is needed: the patched protocol library is bundled and HACS/HA installs its ordinary transport dependencies.
+The patched protocol library is bundled; no manual pip installation is needed.
 
-## If setup still fails
+## What fix.4 changes
+
+The official Android 2.1.2 app's normal dashboard path sends a **clock sync before its first GET refresh**. On every new type-6 connection this build now subscribes, retains the 1.5s Telink wait, then sends the app's calendar command at sequence **0**. It **sets only the vent clock** to HA's configured local calendar; initialization does not change fan mode, speeds, triggers, units or display settings.
+
+The calendar payload is `01 07 YY MM DD weekday hh mm ss`, opcode `03`, with the same `A5 00` header and CCITT-FALSE CRCs as the app. It is **21 bytes**, sent in one acknowledged public Bleak write (not arbitrary 20+1 application fragments). The app requests MTU247. BlueZ's reported `mtu_size=23` may be a placeholder; the HA integration cannot portably force Android's MTU request. We rely on the public acknowledged-write/OS path and preserve any ATT error in the log, not a private MTU helper that could select an unrelated/OTA characteristic.
+
+A matching CRC/sequence/command reply with explicit clock success `01 00` is required before reads or a user command. Missing/rejected/malformed clock replies cannot make setup succeed. Clock sync is idempotently retried on fresh sessions for transient transport failures; rejected ACKs are not retried. No uncertain fan/setting write is replayed. Sequence allocation is deferred until initialization completes, so clock0 precedes query1 on every reconnect.
+
+**Confidence:** high in the APK-derived clock format/order on the dashboard path; **unproven** that the T6 requires clock sync before replying. Enrollment paths may send other preference/read commands first; those are not evidence of mandatory authentication and are not replayed. No type-6 bonding, AES/key/password step, alternative control UUID pair, GAP/revision subscription, signed write, or normal-control priority request was found in the traced path. No OTA access or speculative frame variants were added.
+
+## Capture the next log
 
 Developer Tools → Actions → YAML:
 
@@ -23,55 +34,33 @@ data:
   habluetooth: debug
 ```
 
-Retry setup once and download the **full text log** from Settings → System → Logs. Look for:
+Retry once, then download the **full text log** from Settings → System → Logs. On each fresh type-6 connection expect:
 
-- `BLE service` / `BLE characteristic`: UUIDs, handles and properties, including the extra services.
-- `BLE selected` and `BLE subscribe`: the exact notify/write pair used.
-- `BLE write ... response=True/False bytes=...` and `BLE TX chunk`: what actually went out.
-- `BLE RX sender=... bytes=... diagnostic_read=...`: every BLE value callback before parsing. **BlueZ can generate these on a characteristic READ, not just an on-air notification.** fix.3 disables control-value READs during type-6 setup so those cannot masquerade as replies.
-- `Ignoring ... response`: CRC, sequence, or framing mismatch rather than a missing radio link.
-- `BLE ... failed`: which step failed (`connect`, `service discovery`, `notification subscription`, `write`, `response wait`, `unsubscribe`, or `disconnect`). The setup screen now shows distinct errors.
-- `BLE setup validated`: a real matching mode/speed reply was decoded; it is never faked from advertisements or a successful connection alone.
+1. `BLE selected` notify **70d51002** / write **70d51001**, CCCD **0100**, revision/PnP reads and the **1.5s readiness wait**.
+2. `BLE clock sync start ... sequence=0 local_time=... zone=...`, then **`single acknowledged write length=21`** with `response=True`. Clock TX starts **`a5000009000032a80003`**, followed by `0107`, the current calendar fields and CRC.
+3. Real raw `BLE RX ... diagnostic_read=None`, then **`BLE clock sync reply ... payload=0100`** and **`BLE clock sync acknowledged`**. A successful GATT write alone is not a clock acknowledgement.
+4. Only then model query **`a5000004000160d8000110020320a0b7`** (sequence1). If needed, speeds GET `1112` follows at sequence2. Setup still requires valid mode and both speeds, **`BLE protocol variant validated and selected for config entry`**, and **`BLE setup validated`**.
 
-Retained from fix.2, setup also logs **read-only** diagnostics:
+Failure distinctions:
 
-- `BLE connection context discovery_snapshot_not_live`: available cached Paired/Bonded/Trusted/ServicesResolved information, not proof of current link encryption. No pairing or bonding is initiated.
-- `BLE descriptor`: CCCD UUID/handle discovery.
-- `BLE CCCD stage=before_subscribe/after_subscribe/response_timeout`: `0100` means notifications enabled, `0000` means disabled. A successful `start_notify` without enabled readback deserves scrutiny; unavailable reads do not prove a subscription failed.
-- `BLE diagnostic read label=firmware_revision/hardware_revision/software_revision/pnp_id`: raw bytes and escaped ASCII from 2A26/2A27/2A28/2A50. Metadata reads happen once per setup controller, not a background loop; each read has a 2s deadline.
-- Control-reply snapshots are **disabled during type-6 setup** to avoid read-induced callbacks and stale-value false positives. Revision/PnP/CCCD reads remain; other models retain fix.2 snapshots.
+- **`clock sync write` / `write_failed`** with ATT invalid length/unsupported operation: investigate actual MTU exchange and long-write support. Send the complete error, not only the timeout line.
+- **`clock sync response wait` / `no_response`**: clock was written but no valid reply arrived; no model/fan setting is sent afterward. Expect at most three fresh-session attempts, with 0.25s/0.5s backoff.
+- **`clock sync acknowledgement` / `initialization_failed`**: a frame arrived but its ACK payload is rejected/unrecognized. Raw RX bytes will show what to decode next. The implementation intentionally validates more strictly than the app's permissive result checker.
+- Clock acknowledged **but model query silent**: initialization is no longer the first unanswered step. Capture both clock and query RX/TX.
 
-The first hardware log disproves acknowledged writes alone as the explanation. fix.3 does not guess a new outgoing header, CRC algorithm, encryption key, pairing handshake, or setting write. It retains the fix.2 correction for a separately verified receive-parser defect: valid replies may begin `A5 00` through `A5 1F` (e.g. protocol-3 `A5 13`), while queries still begin `A5 00`. That cannot explain zero raw RX callbacks, but avoids rejecting a genuine reply if notification delivery is restored. There are no extra subscriptions to GAP/revision characteristics and no OTA reads/writes.
+Read-only revision/PnP/CCCD diagnostics remain. **Control-value READ snapshots remain disabled for type6**: BlueZ can produce notification callbacks on READ value changes, which are not proof of on-air notifications. A stored value or advertisement never substitutes for a command reply.
 
-## fix.3: match the official app's Telink startup
+If still silent, the decisive next evidence is a **payload-bearing HCI/ATT capture of the official app connecting to this exact T6/software2.2.14**, compared with HA: MTU request/response, CCCD writes, SMP/security if any, first control write and first device notification. Android's filtered/empty payload logs are not sufficient. No bonding requirement has been established, so there is no justified instruction to pair the vent yet.
 
-Analysis of David's official **Android 2.1.2 APK** exposed a concrete missing startup step: the app waits **1500ms after subscribing/reading revisions for Telink devices, explicitly including type 6**. The failed HA attempts sent a command only **91–178ms after subscription**; every reconnect repeated that early write. A successful GATT write ACK does not prove the firmware is ready to process it. This is a strong compatibility lead, **not hardware-confirmed as the cause**.
+To disable verbose logs, set these levels to `info`, or restart HA unless levels are in configuration.yaml.
 
-Fix.3 waits 1.5s on **every new type-6 connection**, during setup and runtime (not again on an already-ready connection). Then setup uses the app's exact legacy model GET keys `10 02 03 20`, followed by the app's `11 12` speed GET if necessary. The first allocated sequence is 0, as in the app's counter initialization. Requests still use **A5 00**, command **01**, and dual **CCITT-FALSE** CRCs. Advertisement protocol version 3 does **not** go into the outgoing header; `A5 13` belongs to replies.
+## Failure handling and verification limits
 
-There is **no speculative fallback/probe scan**: the supplied app establishes one legacy wire format. Normal bounded read-only retries remain. The app also has clock synchronization (`command 03`, parameter `01`), used before normal dashboard refresh. **That changes the clock and is NOT sent by this patch**, in keeping with read-only setup. No pairing, extra revision/GAP subscriptions or OTA access is added.
+Connect, discovery, subscribe, write, clock/model response wait, unsubscribe and disconnect have named errors and debug tracebacks. Config-flow errors are translated, including clock rejection. Transient transport failures get bounded reconnect/backoff; explicit rejection and uncertain user settings are not replayed. Cancellation propagates, pending futures are released, and failed initialization disconnects before returning. Clock ACK alone does not mark entities available or reset the failure-warning streak; a validated normal response does. There is no background reconnect loop.
 
-Next-log checklist:
+Connect deadline45s, GATT operations10s, response waits8s, unsubscribe/disconnect5s; optional metadata reads2s. Connector connection retries remain bounded too. Tests exercise fake BLE and stubbed HA on Python3.13; actual HA/Python3.14 and vent behavior still require David's verification.
 
-1. `BLE Telink readiness wait start ... delay=1.5s`, then `wait completed elapsed=...` **before any control write on each new connection**.
-2. `BLE app protocol profile=android_2_1_2_telink ... keys=10020320`.
-3. First model query bytes `a5000004000070f9000110020320a0b7` (sequence 0). A read retry may repeat the same request after a fresh connection/delay.
-4. Actual `BLE RX` with a matching A5-family reply (possibly `a513...`), passing length/CRC/command/sequence and mode TLV validation.
-5. `BLE app follow-up query ... keys=1112` if speeds are missing, then **both** `BLE protocol variant validated and selected for config entry` and `BLE setup validated`.
-
-Only complete valid mode/speed data succeeds. The single app-profile identifier is saved in the config entry and restored at restart; runtime model readback uses the same key list. No success is inferred from advertisements, a GATT ACK, stale characteristic reads or partial replies.
-
-If it remains silent after the wait, send the full log and a payload-bearing **official-app connect capture from this exact T6/software 2.2.14**. That can establish whether the normal clock write is an essential prerequisite, another init step exists, or true ATT notifications are absent. Changing the clock would need explicit permission; no such write is silently tried here.
-
-To stop verbose logging, call `logger.set_level` again with these levels set to `info`, or restart HA (unless levels were set in configuration.yaml).
-
-## Failure handling
-
-Normal runtime read-only operations reconnect up to three times with exponential backoff (0.25s, 0.5s), in addition to the connector's bounded connection attempts. Each connect has a 45s cap; writes/subscription have 10s caps; reply waits have an 8s cap (matching the documented app timeout); type-6 connections also have the app-derived 1.5s readiness wait; unsubscribe/disconnect have 5s caps. We never replay an uncertain setting write. All sessions and pending reply futures are cleaned up in failure/cancellation paths. Failed commands mark entities unavailable until a fresh advertisement or valid reply permits another attempt. There is no background reconnect/polling loop. Failures have debug tracebacks and one warning per failure streak; a successful GATT reply resets the streak.
-
-## Evidence and limits
-
-See [the investigation](docs/AIRTAP_INVESTIGATION.md). Only mocked BLE transport and stubbed HA interfaces were tested locally on Python 3.13; David's actual HA uses Python 3.14 and must provide the hardware verification. No commands are sent to unidentified extra GATT services and no undocumented handshake is invented. The user-provided APK and decompiled code remain outside this repository and are not redistributed.
+See [the investigation and exact APK class/line citations](docs/AIRTAP_INVESTIGATION.md). The APK and decompiled source stay outside this repository; only independently written code and protocol facts are included.
 
 ---
 

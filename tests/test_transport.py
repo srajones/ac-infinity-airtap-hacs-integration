@@ -229,6 +229,7 @@ def test_short_advertisement_rejected_with_clear_error():
 async def test_old_session_notifications_and_disconnects_cannot_poison_reconnect(monkeypatch):
     from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble import device as transport
     dev = controller()
+    dev._initialize_telink_session = AsyncMock()  # isolate stale-session routing from clock exchange
     callbacks = []
     async def start_notify(char, handler):
         callbacks.append(handler)

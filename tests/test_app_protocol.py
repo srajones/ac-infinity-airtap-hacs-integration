@@ -40,6 +40,7 @@ async def test_telink_waits_1500ms_after_subscribe_before_returning_ready(monkey
         assert events == ['subscribed']
         assert seconds == 1.5
         events.append('settled')
+    dev._initialize_telink_session = AsyncMock()  # test only the earlier readiness boundary
     client.start_notify.side_effect = subscribed
     monkeypatch.setattr(asyncio, 'sleep', AsyncMock(side_effect=settle))
     await dev._ensure_connected()
@@ -73,10 +74,11 @@ async def test_link_lost_during_telink_wait_has_specific_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_app_query_sequence_zero_then_speed_read_without_clock_or_probe_variants(monkeypatch):
+async def test_model_and_speed_query_bytes_with_transport_stubbed(monkeypatch):
     dev = device()
     sent = []
     async def send(command, retry=None):
+        command = command() if callable(command) else command
         sent.append(command)
         assert retry is None
         assert command[:2] == b'\xa5\x00' and command[8:10] == b'\x00\x01'

@@ -1,3 +1,12 @@
+## 2.2.0-fix.4 — Official-app calendar initialization
+
+- Full APK type-6 connect-path audit: normal dashboard clock-before-GET flow, control UUIDs, acknowledged write type, MTU247 request, no type-6 bond/key/password or extra-notification prerequisite found.
+- Add authorized clock-only initialization to every new type-6 session using HA-local calendar fields; require explicit validated acknowledgement before model reads or user commands.
+- Send the 21-byte clock in one public acknowledged write; log the BlueZ MTU23 placeholder caveat without unsafe private MTU/OTA access.
+- Defer/rebuild request sequence allocation: clock0 then query1, including reconnects; no uncertain user-setting replay.
+- Clock-specific write/response errors, rejection translations, bounded retry/backoff, cancellation cleanup, and warning-once availability behavior.
+- Readiness delay alone disproven by fix.3 hardware log; clock requirement remains hardware-unverified. No release/tag.
+
 ## 2.2.0-fix.3 — Official APK Telink startup compatibility
 
 - Analyze David's supplied official Android 2.1.2 app locally. Its connect pipeline explicitly waits 1500ms for Telink types including AirTap type 6. Add that wait after subscription/revision reads on every new type-6 setup/runtime connection, and detect/clean up link loss or cancellation during it. Previous hardware attempts wrote after only 91–178ms.

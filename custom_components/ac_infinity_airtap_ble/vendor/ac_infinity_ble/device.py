@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import asdict, replace
+from datetime import datetime
 
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
@@ -314,7 +315,9 @@ class ACInfinityController:
                     if self._client is not client or not client.is_connected:
                         raise BLEStepError(step, code, "Device disconnected during Telink settle delay")
                     _LOGGER.debug("%s: BLE Telink readiness wait completed elapsed=%.3fs; "
-                                  "control writes may begin", self.name, self.loop.time() - started)
+                                  "clock initialization may begin", self.name, self.loop.time() - started)
+                    step, code = "clock sync", "initialization_failed"
+                    await self._initialize_telink_session()
                 self._reset_disconnect_timer()
             except BaseException as err:
                 if self._disconnect_timer:
@@ -333,6 +336,49 @@ class ACInfinityController:
                 if error is err:
                     raise
                 raise error from err
+
+    def _get_clock_time(self) -> datetime:
+        """Return aware local time; HA overrides this with its configured timezone."""
+        return datetime.now().astimezone()
+
+    async def _initialize_telink_session(self) -> None:
+        """Clock-sync only; never provision preferences or change fan/mode settings."""
+        if (self._write_char.uuid.lower() != POSSIBLE_WRITE_CHARACTERISTIC_UUIDS[0].lower()
+                or self._read_char.uuid.lower() != POSSIBLE_READ_CHARACTERISTIC_UUIDS[0].lower()
+                or "write" not in self._write_char.properties):
+            raise BLEStepError("clock sync write", "unsupported_model",
+                               "Type-6 app initialization requires the 70d51001/02 acknowledged pair")
+        # Android constructs new connection state with sequence=-1; allocation
+        # increments first, so clock is 0, then the first read is 1.
+        self._sequence = -1
+        try:
+            now = self._get_clock_time()
+            command = self._protocol.set_clock_data(now, self.sequence)
+        except (ValueError, TypeError, OverflowError) as err:
+            raise BLEStepError("clock sync calendar", "initialization_failed", repr(err)) from err
+        _LOGGER.debug("%s: BLE clock sync start type=6 sequence=0 local_time=%s zone=%s; "
+                      "clock only, no fan/mode changes", self.name, now.isoformat(), now.tzname())
+        _LOGGER.debug("%s: Android requests MTU 247; using one public acknowledged write. "
+                      "BlueZ mtu_size=23 can be a placeholder, not the on-air MTU; "
+                      "no private MTU/OTA helpers or pairing requested", self.name)
+        try:
+            # Do NOT recurse into _send_command/_ensure_connected: connect lock
+            # is held. This exchange still uses the operation lock and matching
+            # sequence/command/CRC validation and registers RX before TX.
+            result = await self._send_command_while_connected(command)
+        except BLEStepError as err:
+            if err.step.startswith("clock sync"):
+                raise
+            raise BLEStepError(f"clock sync / {err.step}", err.code, str(err)) from err
+        payload = result[10:-2]
+        _LOGGER.debug("%s: BLE clock sync reply sequence=0 payload=%s", self.name, payload.hex())
+        if payload != b"\x01\x00":
+            raise BLEStepError("clock sync acknowledgement", "initialization_failed",
+                               f"Expected explicit parameter 01 success 00; received {payload.hex()}")
+        if self._client is None or not self._client.is_connected:
+            raise BLEStepError("clock sync completion", "connect_failed", "Disconnected after clock reply")
+        _LOGGER.debug("%s: BLE clock sync acknowledged; session initialized, next sequence=1; "
+                      "model/speed reads still required for setup", self.name)
 
     def _log_diagnostic_failure(self, label: str, error: Exception) -> None:
         """Optional diagnostics never claim a query succeeded or request pairing."""
@@ -543,18 +589,24 @@ class ACInfinityController:
     async def _send_command_locked(self, command: bytes) -> bytes:
         return await self._execute_command_locked(command)
 
-    async def _send_command(self, command: bytes, retry: int | None = None) -> bytes:
+    async def _send_command(
+        self, command: bytes | Callable[[], bytes], retry: int | None = None
+    ) -> bytes:
         """Retry read-only requests on a fresh session; never replay uncertain writes."""
         attempts = DEFAULT_ATTEMPTS
         for attempt in range(attempts):
             writing_started = False
+            resolved_command = None
             try:
                 await self._ensure_connected()
+                # Allocate sequence AFTER per-session initialization, and rebuild
+                # a read after reconnect rather than reusing its old session ID.
+                resolved_command = command() if callable(command) else command
                 writing_started = True
-                return await self._send_command_while_connected(command, retry)
+                return await self._send_command_while_connected(resolved_command, retry)
             except BLEStepError as err:
-                if ((writing_started and command[9] != 1)
-                        or err.code in {"unsupported_model", "invalid_response"}
+                if ((writing_started and resolved_command[9] != 1)
+                        or err.code in {"unsupported_model", "invalid_response", "initialization_failed"}
                         or attempt + 1 == attempts):
                     raise
                 _LOGGER.debug("%s: BLE attempt %s/%s failed at %s; reconnecting after %.2fs",
@@ -623,28 +675,40 @@ class ACInfinityController:
         self._response_buffer.clear()
         # Match the official app's acknowledged write when the device supports it.
         response = "write" in self._write_char.properties
-        step, code = "write", "write_failed"
+        is_clock = (self._state.type == 6 and len(command) == 21
+                    and command[8:12] == b"\x00\x03\x01\x07")
+        step, code = ("clock sync write" if is_clock else "write"), "write_failed"
         try:
+            if is_clock and not response:
+                raise BLEStepError("clock sync write", "unsupported_model", "Clock requires acknowledged write")
             _LOGGER.debug("%s [%s]: BLE write uuid=%s handle=%s properties=%s response=%s bytes=%s",
                           self.name, self.address, self._write_char.uuid,
                           self._write_char.handle, self._write_char.properties, response, command.hex())
             async with asyncio.timeout(GATT_TIMEOUT):
-                # Twenty bytes fits the minimum ATT MTU on every supported backend.
-                for offset in range(0, len(command), 20):
-                    chunk = command[offset:offset + 20]
+                # The app sends the 21-byte calendar whole after requesting MTU
+                # 247. An acknowledged public Bleak write supports up to 512
+                # bytes; let the OS handle ATT, not arbitrary 20+1 app chunks.
+                chunk_size = len(command) if is_clock else 20
+                if is_clock:
+                    _LOGGER.debug("%s: BLE clock sync single acknowledged write length=%s",
+                                  self.name, len(command))
+                for offset in range(0, len(command), chunk_size):
+                    chunk = command[offset:offset + chunk_size]
                     _LOGGER.debug("%s: BLE TX chunk=%s", self.name, chunk.hex())
                     await self._client.write_gatt_char(self._write_char, chunk, response)
             _LOGGER.debug("%s: BLE write completed; awaiting notification sequence=%s command=%s",
                           self.name, self._pending_sequence, self._pending_command)
-            step, code = "response wait", "no_response"
+            step, code = ("clock sync response wait" if is_clock else "response wait"), "no_response"
             async with asyncio.timeout(RESPONSE_TIMEOUT):
                 result = bytes(await self._notify_future)
-            self._record_success()
+            if not is_clock:
+                self._record_success()
             return result
         except (BleakError, TimeoutError, EOFError, OSError) as err:
             error = err if isinstance(err, BLEStepError) else BLEStepError(step, code, repr(err))
             self._record_failure(error)
-            if (self._setup_diagnostics and error.code == "no_response" and command[9] == 1
+            if (self._setup_diagnostics and error.code == "no_response"
+                    and (command[9] == 1 or is_clock)
                     and self._client is not None and self._client.is_connected
                     and self._read_char is not None):
                 await self._log_subscription_state(self._client, "response_timeout")

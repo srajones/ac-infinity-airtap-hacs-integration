@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from .models import DeviceInfo
 from .util import crc16, get_bit, get_bits, get_short
 
@@ -97,6 +99,14 @@ class Protocol:
             result, 8, len(data) + 2
         )
         return bytes(result)
+
+    def set_clock_data(self, now: datetime, sequence: int) -> bytes:
+        """Encode the legacy type-6 calendar sync (no epoch/port trailer)."""
+        if now.tzinfo is None or now.utcoffset() is None or not 2000 <= now.year <= 2099:
+            raise ValueError("Clock sync requires an aware local date in years 2000..2099")
+        return self._add_head(
+            [1, 7, now.year % 100, now.month, now.day, now.isoweekday(),
+             now.hour, now.minute, now.second], 3, sequence)
 
     def get_model_data(self, type: int, b: int, sequence: int) -> bytes:
         command = [16, 17, 18, 19, 20, 21, 22, 23]

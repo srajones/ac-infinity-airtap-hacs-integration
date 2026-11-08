@@ -6,6 +6,7 @@ import dataclasses
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 from .vendor.ac_infinity_ble import ACInfinityController, DeviceInfo
@@ -281,10 +282,14 @@ class ACInfinityDevice(ACInfinityController):
             if not await self._read_back():
                 raise HomeAssistantError(f"{self.name}: failed to read settings")
 
+    def _get_clock_time(self) -> datetime:
+        """Use HA's configured local calendar, not the host/container timezone."""
+        from homeassistant.util import dt as dt_util
+        return dt_util.now()
+
     async def _read_keys(self, keys: list[int]) -> dict[int, bytes]:
         """Read setting keys (cmd 1) over the open connection. Replies are TLV."""
-        command = self._protocol._add_head(keys, 1, self.sequence)
-        data = await self._send_command(command)
+        data = await self._send_command(lambda: self._protocol._add_head(keys, 1, self.sequence))
         values: dict[int, bytes] = {}
         if not data:
             return values
@@ -371,8 +376,7 @@ class ACInfinityDevice(ACInfinityController):
     async def _send_setting_now(self, payload: list[int]) -> None:
         """Write one setting. Call with the command lock held."""
         try:
-            command = self._protocol._add_head(payload, 3, self.sequence)
-            await self._send_command(command)
+            await self._send_command(lambda: self._protocol._add_head(payload, 3, self.sequence))
         except (*BLEAK_EXCEPTIONS, AssertionError) as err:
             await self._execute_disconnect()
             # The device connects per-command; if it's out of range or busy the

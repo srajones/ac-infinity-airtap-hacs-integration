@@ -1,6 +1,6 @@
 # T6 setup investigation
 
-The sections below preserve the investigation history. **fix.3 APK findings at the end supersede earlier hypotheses and snapshot behavior.**
+The sections below preserve the investigation history. **The fix.4 complete-path audit at the end supersedes earlier hypotheses and fix.3 startup behavior.**
 
 ## Confirmed findings
 
@@ -139,3 +139,61 @@ Look for, on every new type-6 connection:
 5. On failure, the specific step/code and traceback: `Telink readiness`, `connect`, `notification subscription`, `write`, `response wait` or `setup validation`, rather than a generic cannot_connect. Failures/cancellation clean up in finally blocks; warning-once streaks and bounded retries remain.
 
 If still silent after the confirmed wait, collect the full HA log and a payload-bearing **official-app connect capture on this exact T6 / software 2.2.14**, including any first clock command, ATT responses/notifications and SMP security exchanges. Ideally capture HA's attempt too. Confirm the app actually controls this vent, and distinguish real packet payloads from Android's filtered HCI logs. That will identify any genuinely mandatory initialization without guessing or silently changing settings.
+
+## fix.4: full type-6 connection path and clock initialization
+
+### Hardware falsification, not another confirmed root-cause claim
+
+`ha_airtap_debug4.log` shows the 1.5s delay actually elapsed, CCCD0100, acknowledged exact-app GET `a5000004000070f9000110020320a0b7`, and **no raw RX on three captured attempts**. The displayed MTU is23. Therefore fix.3's readiness-only explanation is **rejected as sufficient**, just as fix.1's acknowledged-write-only explanation was. The remaining cause is not established by a successful GATT ACK. A peripheral can ignore application data after acknowledging its ATT write.
+
+The latest request authorizes clock synchronization before the model query. Fix.4 implements this known app behavior, not a guessed new header, CRC, password or encryption key. **No successful T6 app/HA radio capture is available here**: a static source trace can establish program paths and packet construction, not prove which packet this firmware first acknowledges.
+
+### End-to-end primary-source trace
+
+All paths/line numbers below refer to the already-described **private JADX1.5.1 Android2.1.2** source tree. They identify methods for audit, not redistributed app code. Protocol descriptions are in our own words.
+
+| Stage | Classes / local source lines | Finding for type6/version3 |
+| --- | --- | --- |
+| Scan → chosen device | `defpackage/hr1.java` (DeviceRepository), nested `d.a.accept`264–286; `scanConnectAndSave`2606–2608; `i.apply`677–683 | Parse scan manufacturer data, match requested type and MAC, then pass the BLEDevice to connect. No password/key derivation step. |
+| Connection state | `hr1.java`2051–2052 → `com/eternal/base/data/ble/BleController.java`4629–4631 → `d.java`289–294 | Construct new connection state from manufacturer type/version/port count. `defpackage/s10.java`87–101 reads type at manufacturer index12 and version11; this is legacy6, not new AirTap48. |
+| OS connection | `c.java` (BleServer)707–708, nested `C0065c`884–927; `com/clj/fastble/bluetooth/BleBluetooth.java`615 | Standard FastBle GATT connect; no createBond/auth/pair API in this route. |
+| Connect chain | `BleController.java`5637–5639 | Connect → MTU → control notify → gated other-family operations → software/hardware reads → Telink delay → mark connected. |
+| MTU | `BleController.java:n1`2196–2203; `c.java:i.a`456–466; `com/clj/fastble/bluetooth/a.java`463–470 | BLE-only type6 requests247; successful MTU callback sets application split length to returnedMTU−5; failure aborts this app chain. |
+| Correct control pair | `BleController.java:c1`432–438; `y.java`27–54 | Subscribe70D51002 under70D51000; writes70D51001. **No control access to1912/2B12.** |
+| Other subscriptions | `BleController.java:r0`2537–2543, `g0`1150–1155, `v`3014–3019, `k`1896–1901, `c5`482–487; `com/eternal/base/protocol/a.java`4320 onward | Extra FFFF notifications and additional indications are Wi-Fi+BLE/thread gated; type6 is outside those predicates. No2A00 or2A26/27/28 indication subscription for type6. |
+| Revision reads and delay | `BleController.java:r4`2616–2619, `g4`1200–1203, `v3`3061–3071; `c.java:f`261–296 | Plain service-discovered software2A28/hardware2A27 reads; revision reader also recognizes firmware2A26. Then1500ms for Telink types, including6. No encrypted challenge in these values. |
+| Normal dashboard clock before query | `com/eternal/main/model/MainModel.java:syncTimeAndStart`1377–1413 and `getDeviceTFP`744–759; `hr1.java`2405–2406,2761–2762; `BleController.java`5004–5007,778–792,5569–5583,5599–5603 | Refresh GETs are cold/deferred until subscription; syncTime eagerly queues a clock transaction and its completion gates the refresh-loop subscription. The other dashboard branch at1386 subscribes to broadcast state, not another immediate GATT GET (`hr1.java`2838–2840). Thus the normal refresh path has a real clock-before-GET ordering, not merely a suggestive method name. |
+| Calendar bytes | `defpackage/vd6.java:setTimeData`1682–1702; `BleController.java:syncTime`5599–5603 | Type6 selects the9-byte calendar payload `01 07 YY MM DD weekday hh mm ss`, command03. No epoch trailer; weekdayMon1..Sun7; local24-hour calendar; YY=year%100. With12-byte envelope the packet is21bytes. |
+| Frame/counter/CRC | `s10.java`13–25; `vd6.java`55–71; `d.java`31–32,116–123; `com/eternal/base/utils/CRCUtil.java`5–24 | OutgoingA500, length/sequenceBE16; first allocation0; dual CRC16/CCITT-FALSE. No protocol3 nibble, per-type checksum mutation, signed envelope or AES. |
+| Write type and boundaries | `y.java`33–54; `defpackage/y85.java`6–7; `c.java`659–683; `defpackage/m70.java`520–547; `com/clj/fastble/bluetooth/a.java`498–524 | Packet passed unchanged; writeType2=AndroidWRITE_TYPE_DEFAULT (acknowledged), not no-response1 or signed4. Split only above configured MTU-derived threshold:21-byte clock is one write when MTU247 is negotiated. App response deadline8s. |
+| Notification → first transaction completion | `c.java:l`540–545,556–615; `d.java:u`275–286; `y.java:onNext`76–82; `BleController.java:x1`3322–3329; `s10.java:checkResult`41–48 | Control notify stream is reassembled, matching sequence routed to queued transaction, then clock result checker inspects parameter/result pairs. A result1 is failure. Static code does not supply this vent's actual first ACK bytes. |
+| Connection priority | `BleController.java`1063,3897,4261,4274,4304 | Audited call sites belong to OTA entry/exit/abort paths. No priority change in normal type6 connect/control. |
+
+**Enrollment is different from the dashboard path.** `hr1.java:g.apply`517–558 persists the device and, for a newly inserted device at530–531, can write the app's temperature-unit preference. It can initiate settings/notification reads at534–547 and an additional800ms wait for type6 at543–545. These preference/read workflows are not evidence of a mandatory authentication handshake. We intentionally do not replay provisioning, change temperature units, or write fan/mode/settings merely because a first-enrollment screen does so. Therefore **clock is not asserted to be universally the app's first command on every screen**.
+
+Searches in the traced app/FastBle code found no `createBond`, PIN, bond-state prerequisite, key/password exchange, or encryption around type6 packet construction/writing. MAC/name processing used to identify a device is not evidence of an AES key. This finding does not exclude link security initiated by the OS/peripheral; an ATT/SMP capture would resolve that. There is no evidence here that HA must bond the vent or that HA cannot talk to it.
+
+### MTU: important remaining platform difference
+
+The app explicitly requests247; the HA public Bleak interface does not offer a portable Android-style `requestMtu(247)`/connection-priority call. Official [Bleak client documentation](https://bleak.readthedocs.io/en/stable/api/client.html) states that BlueZ's `mtu_size` reports23 even when that is not the actual negotiated value, and that acknowledged `write_gatt_char` accepts up to512bytes. OS/backend ATT handling is distinct from application-frame boundaries.
+
+Fix.4 sends the21-byte clock in **one public acknowledged write** and relies on the OS for ATT handling. It does **not** claim to have forced MTU247 or guarantee the peripheral supports long writes if the real MTU remains23. It does not use Bleak's private acquisition workaround: that may choose the first write-without-response/notify characteristic, potentially an unrelated/forbidden OTA endpoint. A clock ATT length/not-supported error is preserved as `write_failed` with traceback and stage. If this fails, compare actual **ATT Exchange MTU request/response and Write vs Prepare/Execute Write** between a successful phone session and HA. The debug property's23 alone cannot settle it.
+
+### Implementation and failure semantics
+
+- On **each new type6 session**, the connect lock covers subscribe → metadata/CCCD diagnostics →1.5s settle →clock synchronization. Already-ready sessions do not repeat initialization. No query or user command can bypass it.
+- The clock uses HA's configured timezone, not containerUTC. The builder rejects naive dates and dates outside2000–2099. It uses the app's exact calendar fields, legacy header and CRC, without epoch/port additions.
+- Reset per-session counter to−1, allocate clock0, **then lazily construct** the model GET at1. Fresh-session read retries rebuild the query after that session's clock, avoiding stale/duplicate sequence allocation. Normal speed GET follows if needed.
+- Raw RX is still logged before validation. Full frame, both CRCs, full command word and sequence must match. Clock ACK must explicitly contain **parameter01/result00**. This is intentionally stricter than the app's permissive checkResult (which only rejects result1); unknown/missing/malformed results raise translated `initialization_failed`, not false success.
+- Clock sync is the newly authorized, idempotent initialization write, not a fan/mode change. Transient clock connect/write/no-response failures retry up to3 fresh sessions with0.25s/0.5s backoff; explicit ACK rejection is not retried. **Ordinary uncertain setting writes are never replayed.**
+- Clock write and response wait are named `clock sync write` and `clock sync response wait` even in the first warning. They retain distinct `write_failed` / `no_response` UI codes and underlying ATT details. Rejection/calendar problems use `initialization_failed` with English translations.
+- Failed/cancelled initialization releases pending futures and disconnects. One warning per failure streak remains. Clock ACK alone does not reset that streak or mark entities available; setup still requires validated mode and both speeds. No metadata/control-value cache can counterfeit success.
+- No release/tag, upstream write, OTA read/write/subscription, private MTU call, pairing attempt, extra revision/GAP subscription, speculative protocol variant, or APK code/assets are part of this change.
+
+### Next log / confidence
+
+High confidence in the static app control pair, acknowledged write, calendar frame, CRC, counter and normal dashboard clock-before-GET flow. **Low-to-moderate confidence that clock omission is the cause of David's silent vent**: source ordering is not proof of a firmware prerequisite. Hardware testing is still necessary; fix.3's wait-alone explanation has already failed.
+
+Expect clock TX prefix `a5000009000032a80003`, followed by `0107` and current local date/time/CRC; then rawRX, clock payload0100 and `BLE clock sync acknowledged`. **Only afterward** expect model query `a5000004000160d8000110020320a0b7` (sequence1), optional speeds query `a50000020002e21b00011112b1c1` (sequence2), and complete setup validation. A normal response, not the clock ACK, is required to establish availability/setup success.
+
+If no clock ACK: the log distinguishes write error from response timeout or rejected ACK. Stop guessing headers/CRC/keys: get a payload-bearing official-app connect trace for this exact T6/software2.2.14, including MTU/CCCD/SMP and the first write/reply, ideally alongside an HA capture. If clock succeeds but model fails, retain both transactions to investigate that narrower mismatch. Test results use fake BLE/stubbed HA on Python3.13; neither hardware nor HA's Python3.14 runtime is certified.
