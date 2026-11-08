@@ -4,7 +4,7 @@ import dataclasses
 import logging
 from typing import Any
 
-from ac_infinity_ble.const import MANUFACTURER_ID
+from .vendor.ac_infinity_ble.const import MANUFACTURER_ID
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -17,6 +17,7 @@ from homeassistant.const import CONF_ADDRESS, CONF_SERVICE_DATA
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import BLEAK_EXCEPTIONS, DOMAIN
+from .errors import config_error
 from .device import ACInfinityDevice, DeviceInfoEx
 from .legacy import async_adopt_legacy_entry, async_find_legacy_entry
 
@@ -24,7 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def parse_manufacturer_data(data: bytes) -> DeviceInfoEx:
-    from ac_infinity_ble.protocol import parse_manufacturer_data as parse
+    from .vendor.ac_infinity_ble.protocol import parse_manufacturer_data as parse
     return DeviceInfoEx.create(parse(data))
 
 
@@ -52,9 +53,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_create_entry(title=legacy.title, data=data)
 
         self._discovery_info = discovery_info
-        device: DeviceInfoEx = parse_manufacturer_data(
-            discovery_info.advertisement.manufacturer_data[MANUFACTURER_ID]
-        )
+        try:
+            device = parse_manufacturer_data(
+                discovery_info.advertisement.manufacturer_data[MANUFACTURER_ID]
+            )
+        except (ValueError, KeyError):
+            _LOGGER.debug("%s: Invalid manufacturer data", discovery_info.address, exc_info=True)
+            return self.async_abort(reason="unsupported_model")
         self.context["title_placeholders"] = {"name": device.name}
         return await self.async_step_user()
 
@@ -79,13 +84,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data = await async_adopt_legacy_entry(self.hass, legacy)
                 return self.async_create_entry(title=legacy.title, data=data)
 
-            controller = ACInfinityDevice(
-                discovery_info.device, advertisement_data=discovery_info.advertisement
-            )
             try:
+                controller = ACInfinityDevice(
+                    discovery_info.device, advertisement_data=discovery_info.advertisement
+                )
                 await controller.update()
-            except BLEAK_EXCEPTIONS:
-                errors["base"] = "cannot_connect"
+            except (*BLEAK_EXCEPTIONS, ValueError) as err:
+                _LOGGER.debug("%s: Setup failed: %s", address, err, exc_info=True)
+                errors["base"] = config_error(err)
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected error")
                 errors["base"] = "unknown"
@@ -95,11 +101,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     title=controller.name,
                     data={
                         CONF_ADDRESS: discovery_info.address,
-                        CONF_SERVICE_DATA: parse_manufacturer_data(
-                            discovery_info.advertisement.manufacturer_data[
-                                MANUFACTURER_ID
-                            ]
-                        ),
+                        CONF_SERVICE_DATA: dataclasses.asdict(controller.state),
                     },
                 )
 
@@ -126,9 +128,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         devices = {}
         for service_info in self._discovered_devices.values():
-            device = parse_manufacturer_data(
-                service_info.advertisement.manufacturer_data[MANUFACTURER_ID]
-            )
+            try:
+                device = parse_manufacturer_data(
+                    service_info.advertisement.manufacturer_data[MANUFACTURER_ID]
+                )
+            except (ValueError, KeyError):
+                _LOGGER.debug("%s: Ignoring invalid manufacturer data", service_info.address, exc_info=True)
+                continue
             devices[service_info.address] = f"{device.name} ({service_info.address})"
 
         data_schema = vol.Schema(
@@ -162,7 +168,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             ble_device = async_ble_device_from_address(self.hass, address, True)
             if ble_device is None:
-                errors["base"] = "cannot_connect"
+                errors["base"] = "connect_failed"
             else:
                 # Minimal seed state; real state is read over GATT in update().
                 # type 6 == "Airtap Series" (see const.DEVICE_MODEL).
@@ -172,8 +178,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 controller = ACInfinityDevice(ble_device, state=device_info)
                 try:
                     await controller.update()
-                except BLEAK_EXCEPTIONS:
-                    errors["base"] = "cannot_connect"
+                except (*BLEAK_EXCEPTIONS, ValueError) as err:
+                    _LOGGER.debug("%s: Manual setup failed: %s", address, err, exc_info=True)
+                    errors["base"] = config_error(err)
                 except Exception:  # pylint: disable=broad-except
                     _LOGGER.exception("Unexpected error")
                     errors["base"] = "unknown"
@@ -183,7 +190,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         title=controller.name or address,
                         data={
                             CONF_ADDRESS: address,
-                            CONF_SERVICE_DATA: dataclasses.asdict(device_info),
+                            CONF_SERVICE_DATA: dataclasses.asdict(controller.state),
                         },
                     )
 

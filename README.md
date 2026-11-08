@@ -1,3 +1,52 @@
+# David's AirTap compatibility build
+
+This fork is a **hardware-unverified compatibility/diagnostic build**, not a claim that the T6 has been tested. Version: `2.2.0-fix.1`.
+
+## Install this fork through HACS
+
+1. Back up Home Assistant. In HACS, remove the downloaded original `ljmerza/ac-infinity-airtap-ble` repository/integration files. Do not keep two repositories managing the same integration folder. Existing HA configuration entries do not need deleting unless troubleshooting requires it.
+2. HACS → ⋮ → **Custom repositories** → add `https://github.com/srajones/ac-infinity-airtap-ble-fix`, category **Integration**.
+3. Download **AC Infinity AirTap (BLE)** from this fork (select `main` if no release is published). Restart Home Assistant. Confirm the downloaded manifest version is `2.2.0-fix.1`.
+4. Settings → Devices & services → Add integration → **AC Infinity AirTap (BLE)** → select `D-8DAQJ` / `A4:C1:38:F6:48:F6`.
+
+Both repositories use domain/folder `ac_infinity_airtap_ble`; this **replaces**, rather than installs alongside, the original. No separate Python library installation is needed: the patched protocol library is bundled and HACS/HA installs its ordinary transport dependencies.
+
+## If setup still fails
+
+Developer Tools → Actions → YAML:
+
+```yaml
+action: logger.set_level
+data:
+  custom_components.ac_infinity_airtap_ble: debug
+  bleak_retry_connector: debug
+  habluetooth: debug
+```
+
+Retry setup once and download the **full text log** from Settings → System → Logs. Look for:
+
+- `BLE service` / `BLE characteristic`: UUIDs, handles and properties, including the extra services.
+- `BLE selected` and `BLE subscribe`: the exact notify/write pair used.
+- `BLE write ... response=True/False bytes=...` and `BLE TX chunk`: what actually went out.
+- `BLE RX sender=... bytes=...`: every received notification before parsing.
+- `Ignoring ... response`: CRC, sequence, or framing mismatch rather than a missing radio link.
+- `BLE ... failed`: which step failed (`connect`, `service discovery`, `notification subscription`, `write`, `response wait`, `unsubscribe`, or `disconnect`). The setup screen now shows distinct errors.
+- `BLE setup validated`: a real matching mode/speed reply was decoded; it is never faked from advertisements or a successful connection alone.
+
+To stop verbose logging, call `logger.set_level` again with these levels set to `info`, or restart HA (unless levels were set in configuration.yaml).
+
+## Failure handling
+
+Read-only operations reconnect up to three times with exponential backoff (0.25s, 0.5s), in addition to the connector's bounded connection attempts. Each connect has a 45s cap; writes/subscription have 10s caps; reply waits have an 8s cap (matching the documented app timeout); unsubscribe/disconnect have 5s caps. We never replay an uncertain setting write. All sessions and pending reply futures are cleaned up in failure/cancellation paths. Failed commands mark entities unavailable until a fresh advertisement or valid reply permits another attempt. There is no background reconnect/polling loop. Failures have debug tracebacks and one warning per failure streak; a successful GATT reply resets the streak.
+
+## Evidence and limits
+
+See [the investigation](docs/AIRTAP_INVESTIGATION.md). Only mocked BLE transport and stubbed HA interfaces were tested locally on Python 3.13; David's actual HA uses Python 3.14 and must provide the hardware verification. No commands are sent to unidentified extra GATT services and no undocumented handshake is invented.
+
+---
+
+## Original project documentation
+
 # AC Infinity AirTap (BLE)
 
 <p align="center">
@@ -60,7 +109,7 @@ apply in Auto. A vent with a high Off Speed can run fast in Auto when it isn't t
 **HACS (custom repository):**
 
 1. HACS → ⋯ → *Custom repositories* → add
-   `https://github.com/ljmerza/ac-infinity-airtap-ble` as an **Integration**.
+   `https://github.com/srajones/ac-infinity-airtap-ble-fix` as an **Integration**.
 2. Install **AC Infinity AirTap (BLE)**, then restart Home Assistant.
 
 **Manual:** copy `custom_components/ac_infinity_airtap_ble/` into your HA `config/custom_components/`.

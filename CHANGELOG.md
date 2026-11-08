@@ -1,3 +1,10 @@
+## 2.2.0-fix.1 — T6 compatibility and diagnostics
+
+- Vendor the compatible MIT-licensed 0.4.3 protocol library with capability-aware acknowledged writes, matching GATT pairs, bounded retries/deadlines, frame reassembly/validation and complete cleanup.
+- Query only required setup mode/speed keys; reject invalid replies instead of masking failures. Serialize queried configuration state correctly.
+- Add step-specific setup errors and English translations, per-step/packet diagnostics, failure-streak logging and graceful command availability.
+- Hardware-unverified: the supplied log establishes a response timeout after connection, not a proven protocol root cause. See docs/AIRTAP_INVESTIGATION.md.
+
 # Changelog
 
 ## 2.2.0

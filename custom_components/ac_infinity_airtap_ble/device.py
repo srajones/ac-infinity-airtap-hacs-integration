@@ -8,15 +8,16 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Optional
 
-from ac_infinity_ble import ACInfinityController, DeviceInfo
-from ac_infinity_ble.const import CallbackType, MANUFACTURER_ID
-from ac_infinity_ble.protocol import parse_manufacturer_data
-from ac_infinity_ble.util import get_short
+from .vendor.ac_infinity_ble import ACInfinityController, DeviceInfo
+from .vendor.ac_infinity_ble.const import CallbackType, MANUFACTURER_ID
+from .vendor.ac_infinity_ble.protocol import parse_manufacturer_data
+from .vendor.ac_infinity_ble.util import get_short
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import BLEAK_EXCEPTIONS
+from .const import BLEAK_EXCEPTIONS, DEVICE_MODEL
+from .vendor.ac_infinity_ble.exceptions import BLEStepError
 
 WORK_TYPE_OFF = 1
 WORK_TYPE_ON = 2
@@ -126,7 +127,10 @@ class ACInfinityDevice(ACInfinityController):
             advertisement_data=advertisement_data,
         )
 
-        if self._state is DeviceInfo:
+        if self._state.type not in DEVICE_MODEL:
+            raise BLEStepError("model identification", "unsupported_model",
+                               f"Unsupported device model type {self._state.type}")
+        if not isinstance(self._state, DeviceInfoEx):
             self._state = DeviceInfoEx(**self._state.__dict__)
 
         self._command_lock = asyncio.Lock()
@@ -170,11 +174,10 @@ class ACInfinityDevice(ACInfinityController):
         type-48 layout is mapped from a live capture, commanded on/off/speed
         state stays authoritative rather than being clobbered by these frames.
         """
-        _LOGGER.debug("%s: Notification received: %s", self.name, data.hex())
+        _LOGGER.debug("%s: BLE RX sender=%s bytes=%s", self.name, _sender, data.hex())
         # Status pushes arrive about once a second, so only a command reply (A5) may
         # resolve the future, or a read could get a status frame back instead.
-        if data[:1] == b"\xa5" and self._notify_future and not self._notify_future.done():
-            self._notify_future.set_result(data)
+        if self._accept_command_notification(data):
             return
         # Unsolicited status push: update environment readings only (never
         # work_type/fan, which this frame does not reliably carry here).
@@ -268,7 +271,9 @@ class ACInfinityDevice(ACInfinityController):
             return values
         payload = bytes(data[10:-2])
         i = 0
-        while i + 1 < len(payload):
+        while i < len(payload):
+            if i + 1 >= len(payload) or i + 2 + payload[i + 1] > len(payload):
+                raise BLEStepError("response parsing", "invalid_response", "Truncated TLV payload")
             length = payload[i + 1]
             values[payload[i]] = payload[i + 2 : i + 2 + length]
             i += 2 + length
@@ -295,7 +300,9 @@ class ACInfinityDevice(ACInfinityController):
                 _LOGGER.debug("%s: Read back 13 again: %s", self.name, values)
                 self._apply_read_back(values)
         except (*BLEAK_EXCEPTIONS, AssertionError) as err:
-            _LOGGER.debug("%s: Read back failed: %r", self.name, err)
+            _LOGGER.debug("%s: Read back failed: %r", self.name, err, exc_info=True)
+            if isinstance(err, BLEStepError):
+                self._record_failure(err)
             return False
         self._fire_callbacks(CallbackType.UPDATE_RESPONSE)
         return True
@@ -342,7 +349,6 @@ class ACInfinityDevice(ACInfinityController):
     async def _send_setting_now(self, payload: list[int]) -> None:
         """Write one setting. Call with the command lock held."""
         try:
-            await self._ensure_connected()
             command = self._protocol._add_head(payload, 3, self.sequence)
             await self._send_command(command)
         except (*BLEAK_EXCEPTIONS, AssertionError) as err:
@@ -575,29 +581,22 @@ class ACInfinityDevice(ACInfinityController):
         self._state.fan = (speed or self._state.level_on or 10) if is_on else 0
 
     async def update(self) -> None:
-        """Read the device once over GATT. Only the config flow uses this."""
-        await self._ensure_connected()
+        """Validate setup using only the AirTap's mode and speed keys."""
         try:
-            _LOGGER.debug("%s: Updating model data", self.name)
-            command = self._protocol.get_model_data(self.state.type, 0, self.sequence)
-            if data := await self._send_command(command):
-                if len(data) >= 28:
-                    self.state.work_type = data[12]
-                    self.state.level_off = data[15]
-                    self.state.level_on = data[18]
-                    self._fire_callbacks(CallbackType.UPDATE_RESPONSE)
-                elif self._parse_status_frame(data):
-                    self._fire_callbacks(CallbackType.UPDATE_RESPONSE)
-                else:
-                    _LOGGER.debug(
-                        "%s: Unrecognized update response (%s): %s",
-                        self.name,
-                        len(data),
-                        data.hex(),
-                    )
-            # The settings read above does not carry temperature; the device
-            # emits that in a periodic 0x1EFF status push. Stay connected a few
-            # seconds so _notification_handler can catch one.
+            values = await self._read_keys([0x10, 0x11, 0x12])
+            if (any(len(values.get(key, b"")) != 1 for key in (0x10, 0x11, 0x12))
+                    or values[0x10][0] not in (1, 2, 3)
+                    or any(values[key][0] > 10 for key in (0x11, 0x12))):
+                error = BLEStepError("setup validation", "invalid_response",
+                                     "Missing or invalid AirTap mode/speed TLVs")
+                self._record_failure(error)
+                raise error
+            self._apply_read_back(values)
+            self._fire_callbacks(CallbackType.UPDATE_RESPONSE)
+            _LOGGER.debug("%s: BLE setup validated: type=%s version=%s values=%s",
+                          self.name, self.state.type, self.state.version,
+                          {hex(k): v.hex() for k, v in values.items()})
+            # Optional unsolicited temperature frames do not stand in for a query reply.
             await asyncio.sleep(4)
         finally:
             await self._execute_disconnect()

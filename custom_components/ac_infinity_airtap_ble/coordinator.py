@@ -5,8 +5,8 @@ import contextlib
 import logging
 
 import async_timeout
-from ac_infinity_ble import DeviceInfo
-from ac_infinity_ble.const import CallbackType, MANUFACTURER_ID
+from .vendor.ac_infinity_ble import DeviceInfo
+from .vendor.ac_infinity_ble.const import CallbackType, MANUFACTURER_ID
 from bleak.backends.device import BLEDevice
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth.passive_update_coordinator import \
@@ -50,6 +50,7 @@ class ACInfinityDataUpdateCoordinator(PassiveBluetoothDataUpdateCoordinator):
         self._device_ready = asyncio.Event()
         self._last_adverts: dict[str, bytes] = {}
         controller.register_callback(self._handle_device_callback)
+        self._malformed_advertisement = False
 
     @callback
     def _async_handle_bluetooth_event(
@@ -70,7 +71,21 @@ class ACInfinityDataUpdateCoordinator(PassiveBluetoothDataUpdateCoordinator):
         self.controller._ble_device = service_info.device
         data = service_info.advertisement.manufacturer_data.get(MANUFACTURER_ID)
         if data:
-            self._handle_manufacturer_data(service_info, data)
+            try:
+                self._handle_manufacturer_data(service_info, data)
+            except (ValueError, IndexError, KeyError):
+                self.logger.debug("%s: Invalid Bluetooth advertisement", self.ble_device.address,
+                                  exc_info=True)
+                if not self._malformed_advertisement:
+                    self.logger.warning("%s: Ignoring malformed AC Infinity advertisement",
+                                        self.ble_device.address)
+                    self._malformed_advertisement = True
+                return
+            self._malformed_advertisement = False
+        # A newly received advertisement allows another on-demand command attempt.
+        # It is not proof of successful GATT communication; keep the failure streak
+        # until a real reply arrives, so advertisements cannot cause warning spam.
+        self.controller.last_command_success = True
         if self.controller.name:
             self._device_ready.set()
         self.logger.debug("%s (%s) state after advertisement: %s",
@@ -101,7 +116,7 @@ class ACInfinityDataUpdateCoordinator(PassiveBluetoothDataUpdateCoordinator):
 
     def _handle_device_callback(self, _state: DeviceInfo, callback_type: CallbackType) -> None:
         """Show values read over a connection, which arrive outside any advertisement."""
-        if callback_type == CallbackType.UPDATE_RESPONSE:
+        if callback_type in (CallbackType.UPDATE_RESPONSE, CallbackType.AVAILABILITY):
             self.async_update_listeners()
 
     async def async_wait_ready(self) -> bool:
@@ -125,10 +140,5 @@ class ActiveBluetoothCoordinatorEntity[
 
     @property
     def available(self) -> bool:
-        """Always available.
-
-        This device is command-driven and connected on demand. Keeping control
-        available lets a command still be attempted if advertisements lapse;
-        reachability surfaces via command success/failure instead.
-        """
-        return True
+        """A failed command marks the device unavailable until a new advert/reply."""
+        return self.coordinator.controller.last_command_success
