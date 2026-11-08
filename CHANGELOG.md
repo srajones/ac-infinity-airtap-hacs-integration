@@ -1,3 +1,10 @@
+## 2.2.0-fix.2 — Read-only diagnosis after the first hardware test
+
+- Hardware test of fix.1 confirmed acknowledged writes still receive zero notifications; do not present that theory as the root cause.
+- During setup, log revision/PnP reads, cached security context, descriptor handles, CCCD readbacks before/after subscription and after timeout, positive write completion, and pre-query/post-timeout control-value snapshots. Reads are allowlisted, bounded and optional; cancellation propagates. Stored values never substitute for a live reply.
+- Accept the APK-verified A5 00–1F reply-header family while retaining CRC/sequence/command validation. Outgoing query framing is unchanged; this proven parser correction does not explain zero raw RX notifications.
+- No pairing, firmware/OTA access, additional notification subscriptions, setting writes during diagnosis, or speculative handshake/query variants.
+
 ## 2.2.0-fix.1 — T6 compatibility and diagnostics
 
 - Vendor the compatible MIT-licensed 0.4.3 protocol library with capability-aware acknowledged writes, matching GATT pairs, bounded retries/deadlines, frame reassembly/validation and complete cleanup.

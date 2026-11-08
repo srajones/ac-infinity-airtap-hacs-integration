@@ -68,6 +68,11 @@ def parse_manufacturer_data(data: bytes) -> DeviceInfo:
     return device
 
 
+def is_command_header(data: bytes | bytearray) -> bool:
+    """The APK accepts response headers A5 00 through A5 1F, not only A5 00."""
+    return len(data) >= 2 and data[0] == 0xA5 and data[1] <= 0x1F
+
+
 class Protocol:
     """Protocol for AC Infinity Controllers."""
 

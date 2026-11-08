@@ -1,12 +1,12 @@
 # David's AirTap compatibility build
 
-This fork is a **hardware-unverified compatibility/diagnostic build**, not a claim that the T6 has been tested. Version: `2.2.0-fix.1`.
+This fork is a **diagnostic build**, not a claim that the T6 connection failure is fixed. The first build was tested on the vent and still received zero notifications despite successful acknowledged writes. Version: `2.2.0-fix.2`.
 
 ## Install this fork through HACS
 
 1. Back up Home Assistant. In HACS, remove the downloaded original `ljmerza/ac-infinity-airtap-ble` repository/integration files. Do not keep two repositories managing the same integration folder. Existing HA configuration entries do not need deleting unless troubleshooting requires it.
 2. HACS → ⋮ → **Custom repositories** → add `https://github.com/srajones/ac-infinity-airtap-ble-fix`, category **Integration**.
-3. Download **AC Infinity AirTap (BLE)** from this fork (select `main` if no release is published). Restart Home Assistant. Confirm the downloaded manifest version is `2.2.0-fix.1`.
+3. Download **AC Infinity AirTap (BLE)** from this fork (select `main` if no release is published). Restart Home Assistant. Confirm the downloaded manifest version is `2.2.0-fix.2`.
 4. Settings → Devices & services → Add integration → **AC Infinity AirTap (BLE)** → select `D-8DAQJ` / `A4:C1:38:F6:48:F6`.
 
 Both repositories use domain/folder `ac_infinity_airtap_ble`; this **replaces**, rather than installs alongside, the original. No separate Python library installation is needed: the patched protocol library is bundled and HACS/HA installs its ordinary transport dependencies.
@@ -32,6 +32,16 @@ Retry setup once and download the **full text log** from Settings → System →
 - `Ignoring ... response`: CRC, sequence, or framing mismatch rather than a missing radio link.
 - `BLE ... failed`: which step failed (`connect`, `service discovery`, `notification subscription`, `write`, `response wait`, `unsubscribe`, or `disconnect`). The setup screen now shows distinct errors.
 - `BLE setup validated`: a real matching mode/speed reply was decoded; it is never faked from advertisements or a successful connection alone.
+
+New in fix.2, setup also logs **read-only** diagnostics:
+
+- `BLE connection context discovery_snapshot_not_live`: available cached Paired/Bonded/Trusted/ServicesResolved information, not proof of current link encryption. No pairing or bonding is initiated.
+- `BLE descriptor`: CCCD UUID/handle discovery.
+- `BLE CCCD stage=before_subscribe/after_subscribe/response_timeout`: `0100` means notifications enabled, `0000` means disabled. A successful `start_notify` without enabled readback deserves scrutiny; unavailable reads do not prove a subscription failed.
+- `BLE diagnostic read label=firmware_revision/hardware_revision/software_revision/pnp_id`: raw bytes and escaped ASCII from 2A26/2A27/2A28/2A50. Metadata reads happen once per setup controller, not a background loop; each read has a 2s deadline.
+- `control_reply_before_query` and `control_reply_after_timeout_not_accepted_as_live`: snapshots of readable 70D51002. Compare the two. A changed A5 response after a query, despite no RX callback, suggests a notification-delivery problem. These potentially stale stored values **never make setup pass**.
+
+The first hardware log disproves acknowledged writes alone as the explanation. fix.2 does not guess a new outgoing header, encryption key, pairing handshake, or setting write. It corrects a separately verified receive-parser defect: valid replies may begin `A5 00` through `A5 1F` (e.g. protocol-3 `A5 13`), while queries still begin `A5 00`. That cannot explain zero raw RX callbacks, but avoids rejecting a genuine reply if notification delivery is restored. There are no extra subscriptions to GAP/revision characteristics and no OTA reads/writes.
 
 To stop verbose logging, call `logger.set_level` again with these levels set to `info`, or restart HA (unless levels were set in configuration.yaml).
 

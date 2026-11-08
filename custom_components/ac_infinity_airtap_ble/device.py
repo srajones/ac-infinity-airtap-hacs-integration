@@ -582,6 +582,7 @@ class ACInfinityDevice(ACInfinityController):
 
     async def update(self) -> None:
         """Validate setup using only the AirTap's mode and speed keys."""
+        self._setup_diagnostics = True
         try:
             values = await self._read_keys([0x10, 0x11, 0x12])
             if (any(len(values.get(key, b"")) != 1 for key in (0x10, 0x11, 0x12))
@@ -599,4 +600,5 @@ class ACInfinityDevice(ACInfinityController):
             # Optional unsolicited temperature frames do not stand in for a query reply.
             await asyncio.sleep(4)
         finally:
+            self._setup_diagnostics = False
             await self._execute_disconnect()

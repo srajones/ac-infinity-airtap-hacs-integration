@@ -24,7 +24,7 @@ from .const import (
 )
 from .exceptions import BLEStepError, CharacteristicMissingError
 from .models import DeviceInfo
-from .protocol import Protocol, parse_manufacturer_data
+from .protocol import Protocol, is_command_header, parse_manufacturer_data
 from .util import crc16, get_bit, get_bits, get_short
 
 BLEAK_BACKOFF_TIME = 0.25
@@ -33,6 +33,17 @@ DEFAULT_ATTEMPTS = 3
 GATT_TIMEOUT = 10
 RESPONSE_TIMEOUT = 8
 DISCONNECT_TIMEOUT = 5
+DIAGNOSTIC_TIMEOUT = 2
+STANDARD_UUID_SUFFIX = "-0000-1000-8000-00805f9b34fb"
+REVISION_CHARACTERISTICS = {
+    "firmware_revision": "00002a26" + STANDARD_UUID_SUFFIX,
+    "hardware_revision": "00002a27" + STANDARD_UUID_SUFFIX,
+    "software_revision": "00002a28" + STANDARD_UUID_SUFFIX,
+    "pnp_id": "00002a50" + STANDARD_UUID_SUFFIX,
+}
+DIAGNOSTIC_READ_UUIDS = frozenset(REVISION_CHARACTERISTICS.values()) | {
+    "70d51002-2c7f-4e75-ae8a-d758951ce4e0",
+}
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,6 +81,10 @@ class ACInfinityController:
         self._response_buffer = bytearray()
         self.last_command_success = True
         self._failure_streak = False
+        self._setup_diagnostics = False
+        self._device_information_attempted = False
+        self._diagnostic_warning = False
+        self._cccd_warning = False
 
     def set_ble_device_and_advertisement_data(
         self, ble_device: BLEDevice, advertisement_data: AdvertisementData
@@ -266,6 +281,9 @@ class ACInfinityController:
                 if not self._resolve_characteristics(client.services):
                     raise BLEStepError(step, "unsupported_model", "No supported notify/write characteristic pair")
                 self._client = client
+                if self._setup_diagnostics:
+                    self._log_connection_context(client)
+                    await self._log_subscription_state(client, "before_subscribe")
                 step, code = "notification subscription", "notify_failed"
                 _LOGGER.debug("%s [%s]: BLE subscribe uuid=%s handle=%s",
                               self.name, self.address, self._read_char.uuid, self._read_char.handle)
@@ -278,6 +296,10 @@ class ACInfinityController:
 
                 async with asyncio.timeout(GATT_TIMEOUT):
                     await client.start_notify(self._read_char, notification_handler)
+                _LOGGER.debug("%s: BLE start_notify completed uuid=%s", self.name, self._read_char.uuid)
+                if self._setup_diagnostics:
+                    await self._log_subscription_state(client, "after_subscribe")
+                    await self._read_device_information(client)
                 self._reset_disconnect_timer()
             except BaseException as err:
                 if self._disconnect_timer:
@@ -297,11 +319,97 @@ class ACInfinityController:
                     raise
                 raise error from err
 
+    def _log_diagnostic_failure(self, label: str, error: Exception) -> None:
+        """Optional diagnostics never claim a query succeeded or request pairing."""
+        _LOGGER.debug("%s: BLE diagnostic %s failed: %r", self.name, label, error, exc_info=True)
+        if not self._diagnostic_warning:
+            _LOGGER.warning("%s: Optional BLE diagnostic %s unavailable: %s; setup will still query the vent",
+                            self.name, label, error)
+            self._diagnostic_warning = True
+
+    def _log_connection_context(self, client) -> None:
+        # This is the BLEDevice's discovery snapshot, NOT a live security query.
+        details = getattr(self._ble_device, "details", None)
+        props = details.get("props", {}) if isinstance(details, dict) else {}
+        props = props if isinstance(props, dict) else {}
+        context = {key: props[key] for key in
+                   ("Paired", "Bonded", "Trusted", "Connected", "ServicesResolved", "AddressType")
+                   if key in props}
+        try:
+            mtu = getattr(client, "mtu_size", "unavailable")
+        except (BleakError, NotImplementedError, OSError) as err:
+            self._log_diagnostic_failure("MTU context", err)
+            mtu = "unavailable"
+        _LOGGER.debug("%s: BLE connection context discovery_snapshot_not_live=%s mtu=%s "
+                      "(no pairing/bonding requested)", self.name, context, mtu)
+
+    async def _read_diagnostic_characteristic(self, client, characteristic, label: str) -> bytes | None:
+        """Read ONLY allowlisted revision/PnP/control-reply values; never an OTA endpoint."""
+        if characteristic.uuid.lower() not in DIAGNOSTIC_READ_UUIDS:
+            raise ValueError("Characteristic is outside the diagnostic read allowlist")
+        if "read" not in characteristic.properties:
+            _LOGGER.debug("%s: BLE diagnostic %s skipped: no read property", self.name, label)
+            return None
+        try:
+            async with asyncio.timeout(DIAGNOSTIC_TIMEOUT):
+                value = bytes(await client.read_gatt_char(characteristic))
+            _LOGGER.debug("%s: BLE diagnostic read label=%s uuid=%s handle=%s bytes=%s ascii=%r",
+                          self.name, label, characteristic.uuid, characteristic.handle,
+                          value.hex(), value.decode("ascii", errors="backslashreplace"))
+            return value
+        except (BleakError, TimeoutError, OSError, EOFError, NotImplementedError, AttributeError) as err:
+            self._log_diagnostic_failure(label, err)
+            return None
+
+    async def _read_device_information(self, client) -> None:
+        """Mirror the app's documented revision READS; do not subscribe to revision indications."""
+        if self._device_information_attempted:
+            return
+        self._device_information_attempted = True
+        for label, uuid in REVISION_CHARACTERISTICS.items():
+            try:
+                characteristic = client.services.get_characteristic(uuid)
+            except (BleakError, NotImplementedError, AttributeError) as err:
+                self._log_diagnostic_failure(f"{label} lookup", err)
+                continue
+            if characteristic is None:
+                _LOGGER.debug("%s: BLE diagnostic %s absent", self.name, label)
+                continue
+            await self._read_diagnostic_characteristic(client, characteristic, label)
+            if not client.is_connected:
+                raise BLEStepError("device information read", "connect_failed",
+                                   "Device disconnected during optional diagnostic reads")
+
+    async def _log_subscription_state(self, client, stage: str) -> None:
+        """Observe the selected control CCCD; never write descriptors ourselves."""
+        descriptors = getattr(self._read_char, "descriptors", ())
+        cccd = next((descriptor for descriptor in descriptors
+                     if descriptor.uuid.lower() == "00002902" + STANDARD_UUID_SUFFIX), None)
+        if cccd is None:
+            _LOGGER.debug("%s: BLE CCCD stage=%s descriptor unavailable; subscription unverified",
+                          self.name, stage)
+            return
+        try:
+            async with asyncio.timeout(DIAGNOSTIC_TIMEOUT):
+                value = bytes(await client.read_gatt_descriptor(cccd.handle))
+            bits = int.from_bytes(value, "little") if len(value) == 2 else None
+            _LOGGER.debug("%s: BLE CCCD stage=%s handle=%s bytes=%s notifications_enabled=%s indications_enabled=%s",
+                          self.name, stage, cccd.handle, value.hex(),
+                          bool(bits & 1) if bits is not None else "unknown",
+                          bool(bits & 2) if bits is not None else "unknown")
+            if (stage == "after_subscribe" and bits is not None and not bits & 1
+                    and not self._cccd_warning):
+                self._cccd_warning = True
+                _LOGGER.warning("%s: BLE CCCD readback does not show notifications enabled; "
+                                "start_notify success alone is not confirmation", self.name)
+        except (BleakError, TimeoutError, OSError, EOFError, NotImplementedError, AttributeError) as err:
+            self._log_diagnostic_failure(f"CCCD {stage}", err)
+
     def _accept_command_notification(self, data: bytearray) -> bool:
         """Reassemble and validate A5 replies; telemetry cannot complete a request."""
         if not self._notify_future or self._notify_future.done() or data[:2] == b"\x1e\xff":
             return False
-        if data[:2] == b"\xa5\x00":
+        if is_command_header(data):
             self._response_buffer.clear()
         elif not self._response_buffer:
             return False
@@ -310,7 +418,7 @@ class ACInfinityController:
         if len(packet) < 8:
             return True
         length = int.from_bytes(packet[2:4], "big") + 12
-        if packet[:2] != b"\xa5\x00" or bytes(crc16(packet, 0, 6)) != packet[6:8] or length > 4096:
+        if not is_command_header(packet) or bytes(crc16(packet, 0, 6)) != packet[6:8] or length > 4096:
             _LOGGER.debug("%s: Ignoring invalid response header: %s", self.name, packet.hex())
             packet.clear()
             return True
@@ -480,6 +588,14 @@ class ACInfinityController:
         """Write according to advertised capabilities and await a matching reply."""
         if self._client is None or not self._read_char or not self._write_char:
             raise BLEStepError("write", "service_failed", "Missing active GATT pair")
+        # Diagnostics must finish before registering a pending request: a stored
+        # value or unsolicited notification during that read is not a query reply.
+        if self._setup_diagnostics and command[9] == 1:
+            await self._read_diagnostic_characteristic(
+                self._client, self._read_char, "control_reply_before_query")
+            if self._client is None or not self._client.is_connected:
+                raise BLEStepError("diagnostic read", "connect_failed",
+                                   "Device disconnected before command write")
         self._notify_future = self.loop.create_future()
         self._pending_sequence = int.from_bytes(command[4:6], "big")
         self._pending_command = command[9]
@@ -497,6 +613,8 @@ class ACInfinityController:
                     chunk = command[offset:offset + 20]
                     _LOGGER.debug("%s: BLE TX chunk=%s", self.name, chunk.hex())
                     await self._client.write_gatt_char(self._write_char, chunk, response)
+            _LOGGER.debug("%s: BLE write completed; awaiting notification sequence=%s command=%s",
+                          self.name, self._pending_sequence, self._pending_command)
             step, code = "response wait", "no_response"
             async with asyncio.timeout(RESPONSE_TIMEOUT):
                 result = bytes(await self._notify_future)
@@ -505,6 +623,12 @@ class ACInfinityController:
         except (BleakError, TimeoutError, EOFError, OSError) as err:
             error = err if isinstance(err, BLEStepError) else BLEStepError(step, code, repr(err))
             self._record_failure(error)
+            if (self._setup_diagnostics and error.code == "no_response" and command[9] == 1
+                    and self._client is not None and self._client.is_connected
+                    and self._read_char is not None):
+                await self._log_subscription_state(self._client, "response_timeout")
+                await self._read_diagnostic_characteristic(
+                    self._client, self._read_char, "control_reply_after_timeout_not_accepted_as_live")
             if error is err:
                 raise
             raise error from err
@@ -526,6 +650,9 @@ class ACInfinityController:
             for char in service.characteristics:
                 _LOGGER.debug("%s: BLE characteristic uuid=%s handle=%s service=%s properties=%s",
                               self.name, char.uuid, char.handle, service.uuid, char.properties)
+                for descriptor in getattr(char, "descriptors", ()):
+                    _LOGGER.debug("%s: BLE descriptor uuid=%s handle=%s characteristic=%s",
+                                  self.name, descriptor.uuid, descriptor.handle, char.uuid)
         for read_uuid, write_uuid in zip(POSSIBLE_READ_CHARACTERISTIC_UUIDS,
                                          POSSIBLE_WRITE_CHARACTERISTIC_UUIDS, strict=True):
             read = services.get_characteristic(read_uuid)
