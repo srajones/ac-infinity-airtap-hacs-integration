@@ -3,7 +3,7 @@ from __future__ import annotations
 from bleak.exc import BleakError
 
 DOMAIN = "ac_infinity_airtap_ble"
-VERSION = "2.2.0-fix.5"
+VERSION = "2.2.0-fix.6"
 
 # Domain used up to 1.x. It collided with dalinicus/homeassistant-acinfinity,
 # so 2.0.0 moved to the name above. Entries created by 1.x are still in
@@ -73,5 +73,6 @@ def get_device_model_name(device_type: int | None) -> str:
 CONF_SCAN_INTERVAL = "scan_interval"
 DEFAULT_SCAN_INTERVAL = 15
 CONF_PASSIVE_ONLY = "passive_only"
+CONF_ATTEMPT_PAIRING = "attempt_pairing"
 AC_INFINITY_SERVICE_UUID = "70d51000-2c7f-4e75-ae8a-d758951ce4e0"
 

@@ -2,17 +2,41 @@
 
 # AC Infinity AirTap HACS Integration
 
-Version **2.2.0-fix.5**, on `main` only. Realized against physical official AC Infinity Android app v2.1.2 HCI snoop packet captures on the AirTap T6 (`A4:C1:38:F6:48:F6`).
+Version **2.2.0-fix.6**, on `main` only. Realigned against decompiled official AC Infinity Android app v2.1.2 protocol logic and synthesized trace analysis for the AirTap T6 (`A4:C1:38:F6:48:F6`).
 
 ## Install / update in HACS
 
 1. Back up HA. Remove the downloaded original `ljmerza/ac-infinity-airtap-ble` repository/files from HACS if still present. Both builds use **the same domain/folder `ac_infinity_airtap_ble`**: replace, do not install alongside. Existing HA config entries need not be deleted just to update.
 2. HACS → ⋮ → **Custom repositories** → URL `https://github.com/srajones/ac-infinity-airtap-hacs-integration`, category **Integration**.
-3. Open this fork → **Redownload → main** (or select release `2.2.0-fix.5`), restart HA, and check its manifest reads `2.2.0-fix.5`.
+3. Open this fork → **Redownload → main** (or select release `2.2.0-fix.6`), restart HA, and check its manifest reads `2.2.0-fix.6`.
 4. Confirm HA's configured timezone is correct (David: **America/Detroit**). Fully close the AC Infinity phone app so it does not compete for the BLE connection.
 5. Settings → Devices & services → Add integration → **AC Infinity AirTap HACS Integration** → `D-8DAQJ` / `A4:C1:38:F6:48:F6`, or retry/reload the existing entry.
 
 The patched protocol library is bundled; no manual pip installation is needed.
+
+## What fix.6 changes
+
+### 1. MTU 23 & MTU 247 Retry 20+1 Clock Chunking with 20ms Inter-PDU Delay (Gap A)
+- **Automatic Characteristic PDU Negotiation**: Safely reads `max_write_without_response_size` from write characteristic `70d51001` or defaults to `client.mtu_size - 3`.
+- **20+1 Chunking Logic**: If `len(command) > max_pdu` (e.g. Linux BlueZ default MTU 23, `max_pdu = 20`) or on clock sync retry attempt (`_connect_attempt >= 1`, even under MTU 247), the 21-byte calendar clock sync payload is split into `min(max_pdu, 20)` chunks (20 bytes followed by 1 byte) with an asynchronous `20ms` delay between chunks (`BleSplitWriter` behavior from official AC Infinity Android app v2.1.2).
+- **Prevents GATT Long Write Rejections**: Under MTU 23, single 21-byte writes in Bleak trigger `ATT_PREPARE_WRITE_REQ` / `ATT_EXECUTE_WRITE_REQ` (GATT Long Writes), which Telink TLSR8266 SDK 3.4.2 peripheral firmware ignores or drops. Chunking forces standard `ATT_WRITE_REQ` (0x12) packets.
+- **Defensive Command Bounds Validation**: Validates `len(command) >= 10` before indexing sequence or opcode fields, raising a clean `BLEStepError("write", "write_failed", ...)` on truncated buffers.
+
+### 2. Non-Fatal Opt-In Pairing Retry (Gap B)
+- **Opt-In Pairing (`attempt_pairing: bool = False` by default)**: Bluetooth pairing/bonding is strictly opt-in to avoid unwanted OS pairing prompts or bluetooth daemon lockups.
+- **Graceful Fallback on Retry**: When enabled by the user, if initial connection or clock sync write fails on retry (`attempt >= 2` or failure streak), the client executes a bounded non-fatal `client.pair()` within a 10s timeout, preserving session continuity even if the underlying OS platform does not implement pairing.
+- **Connection Loss Protection**: If `client.pair()` causes a disconnect, a clean `BLEStepError("pairing", "connect_failed", ...)` is raised and cleanly handled.
+
+### 3. Config Flow & Options Flow Toggles
+- **`passive_only`**: Option to skip GATT connection and command validation entirely, establishing Home Assistant integration entities immediately from passive advertisement manufacturer data (Company ID 2306 / `0x0902`).
+- **`attempt_pairing`**: Option to enable BlueZ pairing attempts on retry during setup and runtime.
+- **Live Reconfiguration**: Both toggles can be adjusted at initial device setup or subsequently in Options Flow without deleting config entries.
+
+### 4. Explicit Model Coverage: AIRTAP T6 & T4
+- Full first-class support for **AIRTAP T6** (White / Quiet Register Booster Fan for 6"×10" and 6"×12" openings) and **AIRTAP T4** (4"×10" and 4"×12" openings), encompassing both Type 6 Bluetooth LE and Type 48 AirTap AI register booster fan models.
+
+### 5. Documentation & Reverse-Engineering Transparency
+- Clarified that physical device `R3GYB0L62ZK` was offline during trace collection (`adb devices -l` showed no devices); the 20-event connection trace was synthesized by cross-referencing decompiled official APK bytecode (`AC-Infinity_2.1.2_apkcube.apks`) with actual Home Assistant debug logs (`home-assistant_2026-11-08T02-32-01.632Z.log`).
 
 ## What fix.5 changes
 
@@ -104,8 +128,9 @@ See [the investigation and exact APK class/line citations](docs/AIRTAP_INVESTIGA
 </p>
 
 A Home Assistant custom integration for **local Bluetooth LE control** of
-[AC Infinity AIRTAP](https://acinfinity.com/register-booster-fans/) register /
-booster-fan vents (e.g. the AIRTAP T4) — no vendor cloud or phone app required.
+[AC Infinity AIRTAP](https://acinfinity.com/register-booster-fans/) register booster fan vents,
+including the **AIRTAP T6** (6"×10" and 6"×12" openings) and **AIRTAP T4** (4"×10" and 4"×12" openings) —
+supporting both Type 6 Bluetooth LE and Type 48 AirTap AI register booster fan models with no vendor cloud or phone app required.
 
 This is a trimmed, BLE-only build focused on the AirTap: **fan control +
 temperature**, nothing else.
@@ -121,7 +146,7 @@ temperature**, nothing else.
 - **Display** switch and **Display Brightness** select.
 - **Refresh Settings** button.
 
-The AirTap T4 reports no humidity, so no humidity entity is created.
+The AirTap vents report no humidity, so no humidity entity is created.
 
 ### How Auto mode runs
 

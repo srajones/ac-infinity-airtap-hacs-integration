@@ -6,11 +6,13 @@
 <a href="https://buymeacoffee.com/srajones"><img src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"></a>
 </p>
 
-Local **Bluetooth LE** control of AC Infinity AirTap register / booster-fan vents
-(e.g. the AIRTAP T4) — no vendor cloud or phone app required.
+Local **Bluetooth LE** control of AC Infinity AirTap register booster fan vents,
+including the **AIRTAP T6** (6"×10" and 6"×12" openings) and **AIRTAP T4** (4"×10" and 4"×12" openings) —
+supporting both Type 6 Bluetooth LE and Type 48 AirTap AI register booster fan models with no vendor cloud or phone app required.
 
-- **Fan**: on / off and 10-step speed control.
-- **Temperature** sensor.
+- **Fan**: on / off, 10-step speed control, and Auto presets.
+- **Sensors**: Ambient Air Temperature, Current Speed, On Speed, Operating Mode, RSSI, and Diagnostic Revisions.
+- **Configurable**: Passive-only broadcast mode, opt-in pairing retry, and custom scan intervals.
 
 Requires a connectable Bluetooth path in range of the vent (an ESPHome
 `bluetooth_proxy` node or a local adapter on the Home Assistant host). Active

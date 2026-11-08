@@ -58,12 +58,19 @@ async def session(monkeypatch):
         return True
     dev._resolve_characteristics = resolve
     async def connect(*args, **kwargs):
-        client = SimpleNamespace(is_connected=True, services=[], mtu_size=23, callback=None,
+        client = SimpleNamespace(is_connected=True, services=[], mtu_size=247, callback=None,
                                  stop_notify=AsyncMock(), disconnect=AsyncMock())
         async def subscribe(char, callback): client.callback = callback
+        pending_clock_chunk = bytearray()
         async def write(char, frame, response):
             assert char.uuid.startswith("70d51001") and response is True
             frame = bytes(frame)
+            if len(frame) == 20 and frame[9] == 3 and frame[10:12] == b"\x01\x07":
+                pending_clock_chunk.extend(frame)
+                return
+            if pending_clock_chunk:
+                frame = bytes(pending_clock_chunk) + frame
+                pending_clock_chunk.clear()
             sent.append(frame)
             if behavior["cancel"]: raise asyncio.CancelledError()
             is_clock = frame[9] == 3 and frame[10:12] == b"\x01\x07"
@@ -145,7 +152,7 @@ async def test_clock_timeout_retries_bounded_fresh_sessions_without_query_or_war
     assert "BLE clock sync response wait failed" in caplog.text
     assert len(sent) == len(clients) == 3
     assert all(f[9] == 3 and f[4:6] == b"\x00\x00" for f in sent)
-    assert [c.args[0] for c in asyncio.sleep.await_args_list] == [1.5, 0.25, 1.5, 0.5, 1.5]
+    assert [c.args[0] for c in asyncio.sleep.await_args_list if c.args[0] != 0.02] == [1.5, 0.25, 1.5, 0.5, 1.5]
     assert sum(r.levelno == logging.WARNING for r in caplog.records) == 1
     assert dev._client is None and dev._notify_future is None
     for client in clients: client.disconnect.assert_awaited_once()

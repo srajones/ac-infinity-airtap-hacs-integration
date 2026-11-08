@@ -36,6 +36,7 @@ except (ImportError, AttributeError):
 from .const import (
     AC_INFINITY_SERVICE_UUID,
     BLEAK_EXCEPTIONS,
+    CONF_ATTEMPT_PAIRING,
     CONF_PASSIVE_ONLY,
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
@@ -153,6 +154,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             selected = user_input[CONF_ADDRESS]
+            passive_only = user_input.get(CONF_PASSIVE_ONLY, False)
+            attempt_pairing = user_input.get(CONF_ATTEMPT_PAIRING, False)
             if selected == "__manual__":
                 return await self.async_step_manual()
 
@@ -205,17 +208,44 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return self.async_create_entry(title=legacy.title, data=data)
 
                 controller = ACInfinityDevice(
-                    discovery_info.device, advertisement_data=discovery_info.advertisement
+                    discovery_info.device,
+                    advertisement_data=discovery_info.advertisement,
+                    attempt_pairing=attempt_pairing,
                 )
-                try:
-                    await controller.update()
-                except (*BLEAK_EXCEPTIONS, ValueError, TimeoutError) as err:
-                    _LOGGER.warning(
-                        "%s: Active GATT validation timed out or failed (%s); falling back to advertisement-backed "
-                        "passive mode to guarantee ambient air temperature sensor availability",
-                        address,
-                        err,
-                    )
+                if not passive_only:
+                    try:
+                        await controller.update()
+                    except (*BLEAK_EXCEPTIONS, ValueError, TimeoutError) as err:
+                        _LOGGER.warning(
+                            "%s: Active GATT validation timed out or failed (%s); falling back to advertisement-backed "
+                            "passive mode to guarantee ambient air temperature sensor availability",
+                            address,
+                            err,
+                        )
+                        if (
+                            discovery_info.advertisement
+                            and hasattr(discovery_info.advertisement, "manufacturer_data")
+                            and MANUFACTURER_ID in discovery_info.advertisement.manufacturer_data
+                        ):
+                            try:
+                                mfr_info = parse_manufacturer_data(
+                                    discovery_info.advertisement.manufacturer_data[MANUFACTURER_ID]
+                                )
+                                new_state = dataclasses.replace(
+                                    controller.state,
+                                    **{k: v for k, v in dataclasses.asdict(mfr_info).items() if v is not None and k != "fan"}
+                                )
+                                controller._state = new_state
+                                try:
+                                    controller.state = new_state
+                                except AttributeError:
+                                    pass
+                            except Exception:
+                                _LOGGER.debug("%s: Error parsing advertisement during fallback", address, exc_info=True)
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.exception("Unexpected error")
+                        errors["base"] = "unknown"
+                else:
                     if (
                         discovery_info.advertisement
                         and hasattr(discovery_info.advertisement, "manufacturer_data")
@@ -235,10 +265,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             except AttributeError:
                                 pass
                         except Exception:
-                            _LOGGER.debug("%s: Error parsing advertisement during fallback", address, exc_info=True)
-                except Exception:  # pylint: disable=broad-except
-                    _LOGGER.exception("Unexpected error")
-                    errors["base"] = "unknown"
+                            _LOGGER.debug("%s: Error parsing advertisement during passive setup", address, exc_info=True)
 
                 if hasattr(controller, "stop") and callable(controller.stop):
                     await controller.stop()
@@ -249,6 +276,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_ADDRESS: discovery_info.address,
                             CONF_SERVICE_DATA: dataclasses.asdict(controller.state),
                             "protocol_variant": controller.protocol_variant,
+                        },
+                        options={
+                            CONF_PASSIVE_ONLY: passive_only,
+                            CONF_ATTEMPT_PAIRING: attempt_pairing,
                         },
                     )
 
@@ -318,6 +349,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         data_schema = vol.Schema(
             {
                 vol.Required(CONF_ADDRESS, default=default_selection): vol.In(options),
+                vol.Optional(CONF_PASSIVE_ONLY, default=False): bool,
+                vol.Optional(CONF_ATTEMPT_PAIRING, default=False): bool,
             }
         )
         return self.async_show_form(
@@ -334,11 +367,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             raw_address = user_input.get(CONF_ADDRESS, "").strip()
+            passive_only = user_input.get(CONF_PASSIVE_ONLY, False)
+            attempt_pairing = user_input.get(CONF_ATTEMPT_PAIRING, False)
             if not MAC_REGEX.match(raw_address):
                 errors["base"] = "invalid_address"
                 return self.async_show_form(
                     step_id="manual",
-                    data_schema=vol.Schema({vol.Required(CONF_ADDRESS): str}),
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required(CONF_ADDRESS): str,
+                            vol.Optional(CONF_PASSIVE_ONLY, default=False): bool,
+                            vol.Optional(CONF_ATTEMPT_PAIRING, default=False): bool,
+                        }
+                    ),
                     errors=errors,
                 )
 
@@ -376,7 +417,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "not_ac_infinity_device"
                     return self.async_show_form(
                         step_id="manual",
-                        data_schema=vol.Schema({vol.Required(CONF_ADDRESS): str}),
+                        data_schema=vol.Schema(
+                            {
+                                vol.Required(CONF_ADDRESS): str,
+                                vol.Optional(CONF_PASSIVE_ONLY, default=False): bool,
+                                vol.Optional(CONF_ATTEMPT_PAIRING, default=False): bool,
+                            }
+                        ),
                         errors=errors,
                     )
 
@@ -401,25 +448,31 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         type=6, name=ble_device.name or address, version=0
                     )
                 controller = ACInfinityDevice(
-                    ble_device, state=device_info, advertisement_data=advert_data
+                    ble_device,
+                    state=device_info,
+                    advertisement_data=advert_data,
+                    attempt_pairing=attempt_pairing,
                 )
                 fallback_ok = False
-                try:
-                    await controller.update()
-                except (*BLEAK_EXCEPTIONS, ValueError, TimeoutError) as err:
-                    if mfr_data is not None:
-                        _LOGGER.warning(
-                            "%s: Manual active GATT validation timed out (%s); falling back to advertisement data",
-                            address,
-                            err,
-                        )
-                        fallback_ok = True
+                if not passive_only:
+                    try:
+                        await controller.update()
+                    except (*BLEAK_EXCEPTIONS, ValueError, TimeoutError) as err:
+                        if mfr_data is not None:
+                            _LOGGER.warning(
+                                "%s: Manual active GATT validation timed out (%s); falling back to advertisement data",
+                                address,
+                                err,
+                            )
+                            fallback_ok = True
+                        else:
+                            _LOGGER.debug("%s: Manual setup failed: %s", address, err, exc_info=True)
+                            errors["base"] = config_error(err)
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.exception("Unexpected error")
+                        errors["base"] = "unknown"
                     else:
-                        _LOGGER.debug("%s: Manual setup failed: %s", address, err, exc_info=True)
-                        errors["base"] = config_error(err)
-                except Exception:  # pylint: disable=broad-except
-                    _LOGGER.exception("Unexpected error")
-                    errors["base"] = "unknown"
+                        fallback_ok = True
                 else:
                     fallback_ok = True
 
@@ -433,11 +486,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_SERVICE_DATA: dataclasses.asdict(controller.state),
                             "protocol_variant": controller.protocol_variant,
                         },
+                        options={
+                            CONF_PASSIVE_ONLY: passive_only,
+                            CONF_ATTEMPT_PAIRING: attempt_pairing,
+                        },
                     )
 
         data_schema = vol.Schema(
             {
                 vol.Required(CONF_ADDRESS): str,
+                vol.Optional(CONF_PASSIVE_ONLY, default=False): bool,
+                vol.Optional(CONF_ATTEMPT_PAIRING, default=False): bool,
             }
         )
         return self.async_show_form(
@@ -468,6 +527,16 @@ class ACInfinityOptionsFlowHandler(OptionsFlow):
     ) -> FlowResult:
         """Manage the options."""
         if user_input is not None:
+            hass = getattr(self, "hass", None)
+            if (
+                self.config_entry
+                and hass
+                and DOMAIN in hass.data
+                and self.config_entry.entry_id in hass.data[DOMAIN]
+            ):
+                entry_data = hass.data[DOMAIN][self.config_entry.entry_id]
+                if hasattr(entry_data, "device") and hasattr(entry_data.device, "attempt_pairing"):
+                    entry_data.device.attempt_pairing = user_input.get(CONF_ATTEMPT_PAIRING, False)
             return self.async_create_entry(title="", data=user_input)
 
         options = self.config_entry.options if self.config_entry else {}
@@ -480,6 +549,10 @@ class ACInfinityOptionsFlowHandler(OptionsFlow):
                 vol.Optional(
                     CONF_PASSIVE_ONLY,
                     default=options.get(CONF_PASSIVE_ONLY, False),
+                ): bool,
+                vol.Optional(
+                    CONF_ATTEMPT_PAIRING,
+                    default=options.get(CONF_ATTEMPT_PAIRING, False),
                 ): bool,
             }
         )

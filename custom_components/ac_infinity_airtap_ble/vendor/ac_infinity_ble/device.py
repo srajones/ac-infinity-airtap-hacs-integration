@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Callable
 from dataclasses import asdict, replace
 from datetime import datetime
+from typing import Any
 
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
@@ -41,6 +43,7 @@ GATT_TIMEOUT = 10
 RESPONSE_TIMEOUT = 8
 DISCONNECT_TIMEOUT = 5
 DIAGNOSTIC_TIMEOUT = 2
+PAIRING_TIMEOUT = 10
 STANDARD_UUID_SUFFIX = "-0000-1000-8000-00805f9b34fb"
 REVISION_CHARACTERISTICS = {
     "firmware_revision": "00002a26" + STANDARD_UUID_SUFFIX,
@@ -80,6 +83,7 @@ class ACInfinityController:
         ble_device: BLEDevice,
         state: DeviceInfo | None = None,
         advertisement_data: AdvertisementData | None = None,
+        attempt_pairing: bool = False,
     ) -> None:
         """Init the ACInfinityController."""
         if not state and not advertisement_data:
@@ -87,6 +91,7 @@ class ACInfinityController:
 
         self._ble_device = ble_device
         self._advertisement_data = advertisement_data
+        self._attempt_pairing = attempt_pairing
         self._operation_lock = asyncio.Lock()
         self._state = state or parse_manufacturer_data(
             advertisement_data.manufacturer_data[MANUFACTURER_ID]  # type: ignore
@@ -107,6 +112,7 @@ class ACInfinityController:
         self._response_buffer = bytearray()
         self.last_command_success = True
         self._failure_streak = False
+        self._connect_attempt: int = 0
         self._setup_diagnostics = False
         self._diagnostic_read_label: str | None = None
         self._device_information_attempted = False
@@ -194,6 +200,15 @@ class ACInfinityController:
     def negotiated_mtu(self) -> int:
         """Get the negotiated ATT MTU."""
         return self._negotiated_mtu
+
+    @property
+    def attempt_pairing(self) -> bool:
+        """Return whether pairing should be attempted on retry."""
+        return self._attempt_pairing
+
+    @attempt_pairing.setter
+    def attempt_pairing(self, value: bool) -> None:
+        self._attempt_pairing = bool(value)
 
     @property
     def state(self) -> DeviceInfo:
@@ -307,9 +322,10 @@ class ACInfinityController:
             _LOGGER.info("%s [%s]: BLE communication recovered", self.name, self.address)
         self._failure_streak = False
         self.last_command_success = True
+        self._connect_attempt = 0
         self._fire_callbacks(CallbackType.AVAILABILITY)
 
-    async def _ensure_connected(self) -> None:
+    async def _ensure_connected(self, attempt: int = 1) -> None:
         """Connect, resolve a supported GATT pair, and subscribe, or release the slot."""
         async with self._connect_lock:
             if self._client and self._client.is_connected and self._read_char:
@@ -327,6 +343,11 @@ class ACInfinityController:
                         use_services_cache=True, ble_device_callback=self._get_ble_device,
                     )
                 self._client = client
+                if self._attempt_pairing and (attempt >= 2 or self._connect_attempt >= 1 or self._failure_streak):
+                    await self._pair_client(client, attempt)
+                    if not client.is_connected:
+                        raise BLEStepError("pairing", "connect_failed", "Device disconnected during pairing attempt")
+
                 step, code = "mtu negotiation", "connect_failed"
                 await self._negotiate_mtu(client)
 
@@ -381,6 +402,37 @@ class ACInfinityController:
                     raise
                 raise error from err
 
+    async def _pair_client(self, client: Any, attempt: int | None = None) -> bool:
+        """Attempt BLE Just Works pairing on retry; gracefully handle non-supporting platforms/proxies."""
+        pair_fn = getattr(client, "pair", None)
+        if pair_fn is None or not callable(pair_fn):
+            _LOGGER.debug("%s [%s]: BLE client has no pair() method; skipping pairing",
+                          self.name, self.address)
+            return False
+
+        if attempt is not None:
+            _LOGGER.info("%s [%s]: Attempting BLE Just Works pairing on retry (attempt %s)",
+                         self.name, self.address, attempt)
+        else:
+            _LOGGER.info("%s [%s]: Attempting BLE Just Works pairing fallback",
+                         self.name, self.address)
+
+        try:
+            async with asyncio.timeout(PAIRING_TIMEOUT):
+                res = pair_fn()
+                if inspect.isawaitable(res):
+                    await res
+            _LOGGER.info("%s [%s]: BLE pairing succeeded or already paired", self.name, self.address)
+            return True
+        except NotImplementedError as err:
+            _LOGGER.debug("%s [%s]: BLE pairing not implemented on this platform/proxy: %s; continuing without pairing",
+                          self.name, self.address, err)
+            return False
+        except (BleakError, OSError, TimeoutError, Exception) as err:
+            _LOGGER.debug("%s [%s]: BLE optional pair() attempt finished/skipped: %r; continuing session",
+                          self.name, self.address, err)
+            return False
+
     def _get_clock_time(self) -> datetime:
         """Return aware local time; HA overrides this with its configured timezone."""
         return datetime.now().astimezone()
@@ -408,6 +460,20 @@ class ACInfinityController:
         except Exception:
             mtu = DEFAULT_MTU
         self._negotiated_mtu = int(mtu) if isinstance(mtu, (int, float)) else DEFAULT_MTU
+        char_max_write = getattr(self._write_char, "max_write_without_response_size", None)
+        try:
+            if callable(char_max_write):
+                char_max_write = char_max_write()
+        except Exception:
+            char_max_write = None
+        if isinstance(char_max_write, (int, float)) and char_max_write > 0:
+            char_mtu = int(char_max_write) + 3
+            if char_mtu > self._negotiated_mtu:
+                _LOGGER.debug(
+                    "%s [%s]: ATT MTU updated to %d bytes from characteristic max_write_without_response_size (%d)",
+                    self.name, self.address, char_mtu, char_max_write,
+                )
+                self._negotiated_mtu = char_mtu
         if self._negotiated_mtu >= TARGET_MTU:
             _LOGGER.debug("%s [%s]: ATT MTU negotiated to %d bytes", self.name, self.address, self._negotiated_mtu)
         else:
@@ -436,16 +502,35 @@ class ACInfinityController:
                       "clock only, no fan/mode changes", self.name, now.isoformat(), now.tzname())
         _LOGGER.debug("%s: Android requests MTU 247; using one public acknowledged write. "
                       "BlueZ mtu_size=23 can be a placeholder, not the on-air MTU; "
-                      "no private MTU/OTA helpers or pairing requested", self.name)
+                      "pairing fallback on retry if needed", self.name)
         try:
             # Do NOT recurse into _send_command/_ensure_connected: connect lock
             # is held. This exchange still uses the operation lock and matching
             # sequence/command/CRC validation and registers RX before TX.
             result = await self._send_command_while_connected(command)
         except BLEStepError as err:
-            if err.step.startswith("clock sync"):
-                raise
-            raise BLEStepError(f"clock sync / {err.step}", err.code, str(err)) from err
+            if self._attempt_pairing and self._client and self._client.is_connected:
+                _LOGGER.debug("%s: Initial BLE clock sync failed (%s); attempting pairing fallback",
+                              self.name, err.step)
+                if await self._pair_client(self._client):
+                    if self._client and self._client.is_connected:
+                        _LOGGER.info("%s: Retrying BLE clock sync after pairing", self.name)
+                        try:
+                            result = await self._send_command_while_connected(command)
+                        except BLEStepError as retry_err:
+                            if retry_err.step.startswith("clock sync"):
+                                raise
+                            raise BLEStepError(f"clock sync / {retry_err.step}", retry_err.code, str(retry_err)) from retry_err
+                    else:
+                        raise
+                else:
+                    if err.step.startswith("clock sync"):
+                        raise
+                    raise BLEStepError(f"clock sync / {err.step}", err.code, str(err)) from err
+            else:
+                if err.step.startswith("clock sync"):
+                    raise
+                raise BLEStepError(f"clock sync / {err.step}", err.code, str(err)) from err
         payload = result[10:-2]
         _LOGGER.debug("%s: BLE clock sync reply sequence=0 payload=%s", self.name, payload.hex())
         if payload != b"\x01\x00":
@@ -457,7 +542,7 @@ class ACInfinityController:
                       "model/speed reads still required for setup", self.name)
 
     def _log_diagnostic_failure(self, label: str, error: Exception) -> None:
-        """Optional diagnostics never claim a query succeeded or request pairing."""
+        """Optional diagnostics never claim a query succeeded."""
         _LOGGER.debug("%s: BLE diagnostic %s failed: %r", self.name, label, error, exc_info=True)
         if not self._diagnostic_warning:
             _LOGGER.warning("%s: Optional BLE diagnostic %s unavailable: %s; setup will still query the vent",
@@ -478,7 +563,7 @@ class ACInfinityController:
             self._log_diagnostic_failure("MTU context", err)
             mtu = "unavailable"
         _LOGGER.debug("%s: BLE connection context discovery_snapshot_not_live=%s mtu=%s "
-                      "(no pairing/bonding requested)", self.name, context, mtu)
+                      "(pairing fallback enabled on retry)", self.name, context, mtu)
 
     async def _read_diagnostic_characteristic(self, client, characteristic, label: str) -> bytes | None:
         """Read ONLY allowlisted revision/PnP/control-reply values; never an OTA endpoint."""
@@ -690,27 +775,32 @@ class ACInfinityController:
     ) -> bytes:
         """Retry read-only requests on a fresh session; never replay uncertain writes."""
         attempts = DEFAULT_ATTEMPTS
-        for attempt in range(attempts):
-            writing_started = False
-            resolved_command = None
-            try:
-                await self._ensure_connected()
-                # Allocate sequence AFTER per-session initialization, and rebuild
-                # a read after reconnect rather than reusing its old session ID.
-                resolved_command = command() if callable(command) else command
-                writing_started = True
-                return await self._send_command_while_connected(resolved_command, retry)
-            except BLEStepError as err:
-                if ((writing_started and resolved_command[9] != 1)
-                        or err.code in {"unsupported_model", "invalid_response", "initialization_failed"}
-                        or attempt + 1 == attempts):
-                    raise
-                _LOGGER.debug("%s: BLE attempt %s/%s failed at %s; reconnecting after %.2fs",
-                              self.name, attempt + 1, attempts, err.step,
-                              BLEAK_BACKOFF_TIME * (2 ** attempt), exc_info=True)
-                await self._execute_disconnect()
-                await asyncio.sleep(BLEAK_BACKOFF_TIME * (2 ** attempt))
-        raise RuntimeError("Unreachable")
+        try:
+            for attempt in range(attempts):
+                self._connect_attempt = attempt
+                writing_started = False
+                resolved_command = None
+                try:
+                    await self._ensure_connected(attempt=attempt + 1)
+                    # Allocate sequence AFTER per-session initialization, and rebuild
+                    # a read after reconnect rather than reusing its old session ID.
+                    resolved_command = command() if callable(command) else command
+                    writing_started = True
+                    return await self._send_command_while_connected(resolved_command, retry)
+                except BLEStepError as err:
+                    is_query = bool(resolved_command and len(resolved_command) >= 10 and resolved_command[9] == 1)
+                    if ((writing_started and not is_query)
+                            or err.code in {"unsupported_model", "invalid_response", "initialization_failed"}
+                            or attempt + 1 == attempts):
+                        raise
+                    _LOGGER.debug("%s: BLE attempt %s/%s failed at %s; reconnecting after %.2fs",
+                                  self.name, attempt + 1, attempts, err.step,
+                                  BLEAK_BACKOFF_TIME * (2 ** attempt), exc_info=True)
+                    await self._execute_disconnect()
+                    await asyncio.sleep(BLEAK_BACKOFF_TIME * (2 ** attempt))
+            raise RuntimeError("Unreachable")
+        finally:
+            self._connect_attempt = 0
 
     async def _send_command_while_connected(
         self, command: bytes, retry: int | None = None
@@ -758,6 +848,8 @@ class ACInfinityController:
         if self._client is None or not self._read_char or not self._write_char:
             raise BLEStepError("write", "service_failed", "Missing active GATT pair")
         validate_not_ota_endpoint(self._write_char)
+        if len(command) < 10:
+            raise BLEStepError("write", "write_failed", f"Command payload too short ({len(command)} bytes; minimum 10)")
         # Diagnostics must finish before registering a pending request: a stored
         # value or unsolicited notification during that read is not a query reply.
         if self._setup_diagnostics and command[9] == 1 and self._state.type != 6:
@@ -796,14 +888,38 @@ class ACInfinityController:
                           self.name, self.address, self._write_char.uuid,
                           self._write_char.handle, self._write_char.properties, response, command.hex())
             async with asyncio.timeout(GATT_TIMEOUT):
+                char_max_write = getattr(self._write_char, "max_write_without_response_size", None)
+                try:
+                    if callable(char_max_write):
+                        char_max_write = char_max_write()
+                except Exception:
+                    char_max_write = None
                 max_pdu = max(20, self._negotiated_mtu - 3)
-                chunk_size = len(command) if (is_clock or response or len(command) <= max_pdu) else max_pdu
+                if isinstance(char_max_write, (int, float)) and char_max_write >= 20:
+                    max_pdu = max(max_pdu, int(char_max_write))
+
+                is_retry = getattr(self, "_connect_attempt", 0) >= 1
+                should_split = len(command) > max_pdu or (is_clock and is_retry)
+                chunk_size = min(max_pdu, 20) if should_split else len(command)
+
+                chunks = [command[i:i + chunk_size] for i in range(0, len(command), chunk_size)]
                 if is_clock:
-                    _LOGGER.debug("%s: BLE clock sync single acknowledged write length=%s",
-                                  self.name, len(command))
-                for offset in range(0, len(command), chunk_size):
-                    chunk = command[offset:offset + chunk_size]
-                    _LOGGER.debug("%s: BLE TX chunk=%s", self.name, chunk.hex())
+                    if len(chunks) > 1:
+                        _LOGGER.debug(
+                            "%s: BLE clock sync split into %d chunks (chunk_size=%d, MTU=%d, max_pdu=%d, retry=%s)",
+                            self.name, len(chunks), chunk_size, self._negotiated_mtu, max_pdu, is_retry,
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "%s: BLE clock sync single acknowledged write length=%d (MTU=%d, max_pdu=%d)",
+                            self.name, len(command), self._negotiated_mtu, max_pdu,
+                        )
+
+                for idx, chunk in enumerate(chunks):
+                    if idx > 0:
+                        await asyncio.sleep(0.02)
+                    _LOGGER.debug("%s: BLE TX chunk %d/%d (%d bytes): %s",
+                                  self.name, idx + 1, len(chunks), len(chunk), chunk.hex())
                     await self._client.write_gatt_char(self._write_char, chunk, response)
             _LOGGER.debug("%s: BLE write completed; awaiting notification sequence=%s command=%s",
                           self.name, self._pending_sequence, self._pending_command)
@@ -859,5 +975,19 @@ class ACInfinityController:
                 validate_not_ota_endpoint(write)
                 self._read_char, self._write_char = read, write
                 _LOGGER.debug("%s: BLE selected notify=%s write=%s", self.name, read.uuid, write.uuid)
+                char_max_write = getattr(self._write_char, "max_write_without_response_size", None)
+                try:
+                    if callable(char_max_write):
+                        char_max_write = char_max_write()
+                except Exception:
+                    char_max_write = None
+                if isinstance(char_max_write, (int, float)) and char_max_write > 0:
+                    char_mtu = int(char_max_write) + 3
+                    if char_mtu > self._negotiated_mtu:
+                        _LOGGER.debug(
+                            "%s [%s]: ATT MTU updated to %d bytes from write characteristic (max_write=%d)",
+                            self.name, self.address, char_mtu, char_max_write,
+                        )
+                        self._negotiated_mtu = char_mtu
                 return True
         return False

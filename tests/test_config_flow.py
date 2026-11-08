@@ -690,3 +690,80 @@ async def test_manual_setup_without_advertisement_data_fails_on_gatt_timeout(
     result = await flow.async_step_manual({"address": "A4:C1:38:F6:48:F6"})
     assert result["errors"]["base"] == "connect_failed"
     controller.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_user_step_passive_only_skips_gatt_update(flow_module, monkeypatch):
+    """Test user step with passive_only=True skips controller.update() entirely."""
+    flow = make_flow(flow_module)
+    mfr_bytes = build_mfr_payload(dev_type=6, version=3, serial=b"8DAQJ", tmp_c=22.0)
+    advert = SimpleNamespace(manufacturer_data={MANUFACTURER_ID: mfr_bytes})
+    discovery = SimpleNamespace(
+        address="A4:C1:38:F6:48:F6",
+        device=SimpleNamespace(name="vent"),
+        advertisement=advert,
+    )
+    flow._discovered_devices[discovery.address] = discovery
+
+    state = DeviceInfoEx(type=6, version=3, name="D-8DAQJ")
+    controller = SimpleNamespace(
+        state=state,
+        name=state.name,
+        protocol_variant="android_2_1_2_telink",
+        update=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    monkeypatch.setattr(flow_module, "ACInfinityDevice", lambda *args, **kwargs: controller)
+
+    entry = await flow.async_step_user({"address": discovery.address, "passive_only": True})
+    controller.update.assert_not_awaited()
+    assert entry["options"]["passive_only"] is True
+    assert entry["options"]["attempt_pairing"] is False
+
+
+@pytest.mark.asyncio
+async def test_user_step_attempt_pairing_passed_to_device_and_options(flow_module, monkeypatch):
+    """Test user step passes attempt_pairing=True to ACInfinityDevice and stores in options."""
+    flow = make_flow(flow_module)
+    mfr_bytes = build_mfr_payload(dev_type=6, version=3, serial=b"8DAQJ", tmp_c=22.0)
+    advert = SimpleNamespace(manufacturer_data={MANUFACTURER_ID: mfr_bytes})
+    discovery = SimpleNamespace(
+        address="A4:C1:38:F6:48:F6",
+        device=SimpleNamespace(name="vent"),
+        advertisement=advert,
+    )
+    flow._discovered_devices[discovery.address] = discovery
+
+    captured_kwargs = {}
+    state = DeviceInfoEx(type=6, version=3, name="D-8DAQJ")
+    controller = SimpleNamespace(
+        state=state,
+        name=state.name,
+        protocol_variant="android_2_1_2_telink",
+        update=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    def mock_device(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return controller
+
+    monkeypatch.setattr(flow_module, "ACInfinityDevice", mock_device)
+
+    entry = await flow.async_step_user({"address": discovery.address, "attempt_pairing": True})
+    assert captured_kwargs.get("attempt_pairing") is True
+    assert entry["options"]["attempt_pairing"] is True
+
+
+@pytest.mark.asyncio
+async def test_options_flow_toggles_attempt_pairing_and_live_updates_device(flow_module):
+    """Test options flow allows toggling attempt_pairing and updates live device."""
+    from custom_components.ac_infinity_airtap_ble.const import CONF_ATTEMPT_PAIRING, DOMAIN
+    entry = SimpleNamespace(options={}, data={}, entry_id="test_entry_id")
+    handler = flow_module.ACInfinityOptionsFlowHandler(entry)
+
+    mock_device = SimpleNamespace(attempt_pairing=False)
+    handler.hass = SimpleNamespace(data={DOMAIN: {"test_entry_id": SimpleNamespace(device=mock_device)}})
+
+    result = await handler.async_step_init({CONF_ATTEMPT_PAIRING: True, CONF_PASSIVE_ONLY: False, "scan_interval": 15})
+    assert result["data"][CONF_ATTEMPT_PAIRING] is True
+    assert mock_device.attempt_pairing is True

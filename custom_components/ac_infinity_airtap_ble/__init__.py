@@ -9,7 +9,7 @@ from homeassistant.const import CONF_ADDRESS, CONF_SERVICE_DATA, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN
+from .const import CONF_ATTEMPT_PAIRING, DOMAIN
 from .coordinator import ACInfinityDataUpdateCoordinator
 from .device import ACInfinityDevice, DeviceInfoEx
 from .models import ACInfinityData
@@ -46,8 +46,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             f"Unexpected config entry service data type: {type(service_data)}"
         )
 
-    device = ACInfinityDevice(ble_device, device_info,
-                              protocol_variant=entry.data.get("protocol_variant"))
+    attempt_pairing = entry.options.get(
+        CONF_ATTEMPT_PAIRING, entry.data.get(CONF_ATTEMPT_PAIRING, False)
+    )
+    device = ACInfinityDevice(
+        ble_device,
+        device_info,
+        protocol_variant=entry.data.get("protocol_variant"),
+        attempt_pairing=attempt_pairing,
+    )
     device.set_ble_device_callback(
         lambda: bluetooth.async_ble_device_from_address(hass, address.upper(), connectable=True)
     )

@@ -8,14 +8,18 @@
         "title": "Select AirTap vent",
         "description": "Select an AC Infinity fan or controller to configure, or enter its address manually.",
         "data": {
-          "address": "Device"
+          "address": "Device",
+          "passive_only": "Passive advertisement mode only (no active GATT connections)",
+          "attempt_pairing": "Attempt Bluetooth pairing on connection retry"
         }
       },
       "manual": {
         "title": "Connect by Bluetooth address",
         "description": "Enter the Bluetooth MAC address of your AC Infinity device (e.g., A4:C1:38:F6:48:F6).",
         "data": {
-          "address": "Bluetooth Address (MAC)"
+          "address": "Bluetooth Address (MAC)",
+          "passive_only": "Passive advertisement mode only (no active GATT connections)",
+          "attempt_pairing": "Attempt Bluetooth pairing on connection retry"
         }
       }
     },
@@ -47,7 +51,8 @@
         "description": "Configure operation modes and polling intervals.",
         "data": {
           "scan_interval": "Update interval (seconds)",
-          "passive_only": "Passive advertisement mode only (no active GATT connections)"
+          "passive_only": "Passive advertisement mode only (no active GATT connections)",
+          "attempt_pairing": "Attempt Bluetooth pairing on connection retry"
         }
       }
     }

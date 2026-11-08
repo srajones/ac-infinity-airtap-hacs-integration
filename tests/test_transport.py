@@ -490,3 +490,299 @@ async def test_settle_delay_post_cccd_with_zero_intervening_reads(monkeypatch):
     events_between = events[start_notify_idx + 1:clock_idx]
     assert "read" not in events_between
 
+
+@pytest.mark.asyncio
+async def test_mtu_negotiation_incorporates_characteristic_max_write_size():
+    """Verify that MTU negotiation incorporates max_write_without_response_size from write_char."""
+    dev = controller()
+    dev._write_char = char(WRITE[0], ["write", "write-without-response"])
+
+    # Case 1: BlueZ sets max_write_without_response_size = 20 (MTU = 23)
+    dev._write_char.max_write_without_response_size = 20
+    client = SimpleNamespace(request_mtu=AsyncMock(side_effect=NotImplementedError), mtu_size=23)
+    await dev._negotiate_mtu(client)
+    assert dev.negotiated_mtu == 23
+
+    # Case 2: BlueZ negotiated MTU 247, so max_write_without_response_size = 244
+    # Even if client.mtu_size is reported as 23 (placeholder), the characteristic attribute overrides it
+    dev._write_char.max_write_without_response_size = 244
+    client_stale = SimpleNamespace(request_mtu=AsyncMock(side_effect=NotImplementedError), mtu_size=23)
+    await dev._negotiate_mtu(client_stale)
+    assert dev.negotiated_mtu == 247
+
+    # Case 3: write_char has no max_write_without_response_size attribute (None fallback)
+    delattr(dev._write_char, "max_write_without_response_size")
+    client_fallback = SimpleNamespace(request_mtu=AsyncMock(side_effect=NotImplementedError), mtu_size=23)
+    await dev._negotiate_mtu(client_fallback)
+    assert dev.negotiated_mtu == 23
+
+
+@pytest.mark.asyncio
+async def test_clock_sync_chunked_20_plus_1_under_mtu_23(monkeypatch):
+    """Verify 21-byte clock sync under MTU 23 is split into 20B + 1B chunks with 20ms gap."""
+    dev = controller()
+    dev._read_char = char(READ[0], ["notify"])
+    dev._write_char = char(WRITE[0], ["write"])
+    dev._negotiated_mtu = 23  # max_pdu = 20
+
+    writes = []
+    sleeps = []
+
+    async def write(characteristic, data, response):
+        writes.append((bytes(data), response))
+        if len(writes) == 2:
+            # Simulate device notification response acknowledging clock sync
+            valid_reply = Protocol()._add_head([0x01, 0x00], 3, 0)
+            dev._notification_handler(dev._read_char, bytearray(valid_reply))
+
+    async def fake_sleep(duration):
+        sleeps.append(duration)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    dev._client = SimpleNamespace(write_gatt_char=write)
+
+    # 21-byte calendar clock sync command
+    clock_cmd = Protocol()._add_head([0x01, 0x07, 0x1A, 0x0B, 0x08, 0x07, 0x03, 0x00, 0x00], 3, 0)
+    assert len(clock_cmd) == 21
+
+    await dev._execute_command_locked(clock_cmd)
+
+    # Must be split into exactly 2 writes
+    assert len(writes) == 2
+    # Chunk 1: 20 bytes, response=True (ATT_WRITE_REQ)
+    assert len(writes[0][0]) == 20
+    assert writes[0][0] == clock_cmd[:20]
+    assert writes[0][1] is True
+
+    # Chunk 2: 1 byte, response=True (ATT_WRITE_REQ)
+    assert len(writes[1][0]) == 1
+    assert writes[1][0] == clock_cmd[20:]
+    assert writes[1][1] is True
+
+    # Sleep between chunks must be 20ms (0.02s)
+    assert 0.02 in sleeps
+
+
+@pytest.mark.asyncio
+async def test_clock_sync_single_write_under_mtu_247(monkeypatch):
+    """Verify 21-byte clock sync under MTU 247 is sent in a single write without splitting."""
+    dev = controller()
+    dev._read_char = char(READ[0], ["notify"])
+    dev._write_char = char(WRITE[0], ["write"])
+    dev._negotiated_mtu = 247  # max_pdu = 244
+
+    writes = []
+    sleeps = []
+
+    async def write(characteristic, data, response):
+        writes.append((bytes(data), response))
+        valid_reply = Protocol()._add_head([0x01, 0x00], 3, 0)
+        dev._notification_handler(dev._read_char, bytearray(valid_reply))
+
+    async def fake_sleep(duration):
+        sleeps.append(duration)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    dev._client = SimpleNamespace(write_gatt_char=write)
+
+    clock_cmd = Protocol()._add_head([0x01, 0x07, 0x1A, 0x0B, 0x08, 0x07, 0x03, 0x00, 0x00], 3, 0)
+    assert len(clock_cmd) == 21
+
+    await dev._execute_command_locked(clock_cmd)
+
+    # Must be sent as a single write of 21 bytes
+    assert len(writes) == 1
+    assert len(writes[0][0]) == 21
+    assert writes[0][1] is True
+    assert 0.02 not in sleeps
+
+
+@pytest.mark.asyncio
+async def test_clock_sync_chunked_on_mtu_247_retry(monkeypatch):
+    """Verify 21-byte clock sync under MTU 247 on retry is split into 20B + 1B chunks with 20ms gap."""
+    dev = controller()
+    dev._read_char = char(READ[0], ["notify"])
+    dev._write_char = char(WRITE[0], ["write"])
+    dev._negotiated_mtu = 247  # max_pdu = 244
+    dev._connect_attempt = 1   # retry attempt >= 1
+
+    writes = []
+    sleeps = []
+
+    async def write(characteristic, data, response):
+        writes.append((bytes(data), response))
+        if len(writes) == 2:
+            valid_reply = Protocol()._add_head([0x01, 0x00], 3, 0)
+            dev._notification_handler(dev._read_char, bytearray(valid_reply))
+
+    async def fake_sleep(duration):
+        sleeps.append(duration)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    dev._client = SimpleNamespace(write_gatt_char=write)
+
+    clock_cmd = Protocol()._add_head([0x01, 0x07, 0x1A, 0x0B, 0x08, 0x07, 0x03, 0x00, 0x00], 3, 0)
+    assert len(clock_cmd) == 21
+
+    await dev._execute_command_locked(clock_cmd)
+
+    # Must be split into exactly 2 writes on retry even with MTU 247
+    assert len(writes) == 2
+    assert len(writes[0][0]) == 20
+    assert writes[0][0] == clock_cmd[:20]
+    assert writes[0][1] is True
+    assert len(writes[1][0]) == 1
+    assert writes[1][0] == clock_cmd[20:]
+    assert writes[1][1] is True
+    assert 0.02 in sleeps
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_cmd", [b"", b"\x01", b"\xa5\x00\x01\x02", b"123456789"])
+async def test_execute_command_locked_too_short_raises_step_error(bad_cmd):
+    """Verify commands shorter than 10 bytes raise BLEStepError instead of IndexError."""
+    from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble.exceptions import BLEStepError
+
+    dev = controller()
+    dev._read_char = char(READ[0], ["notify"])
+    dev._write_char = char(WRITE[0], ["write"])
+    dev._client = SimpleNamespace(write_gatt_char=None)
+
+    with pytest.raises(BLEStepError) as exc_info:
+        await dev._execute_command_locked(bad_cmd)
+
+    assert exc_info.value.step == "write"
+    assert exc_info.value.code == "write_failed"
+    assert "Command payload too short" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pair_side_effect,should_succeed",
+    [
+        (None, True),                                  # pair() succeeds
+        (NotImplementedError("not supported"), True), # pair() unsupported (macOS/proxy) -> continues
+        (Exception("BleakError: Auth failed"), True),  # pair() fails -> carries on
+        (TimeoutError(), True),                        # pair() times out -> carries on
+    ],
+)
+async def test_client_pair_on_retry_and_graceful_fallback(monkeypatch, pair_side_effect, should_succeed):
+    """Verify client.pair() is attempted on retry when opt-in and gracefully handled on error/timeout."""
+    from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble import device as transport
+
+    dev = controller()
+    dev._attempt_pairing = True
+    dev._connect_attempt = 1  # Simulate retry attempt >= 1
+    read_c = char(READ[0], ["notify"])
+    write_c = char(WRITE[0], ["write"])
+
+    client = SimpleNamespace(
+        pair=AsyncMock(side_effect=pair_side_effect),
+        start_notify=AsyncMock(),
+        read_gatt_char=AsyncMock(),
+        write_gatt_char=AsyncMock(),
+        is_connected=True,
+        services=[],
+        mtu_size=247,
+    )
+
+    monkeypatch.setattr(transport, "establish_connection", AsyncMock(return_value=client))
+    monkeypatch.setattr(dev, "_resolve_characteristics", lambda s: setattr(dev, "_read_char", read_c) or setattr(dev, "_write_char", write_c) or True)
+    monkeypatch.setattr(dev, "_initialize_telink_session", AsyncMock())
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    await dev._ensure_connected()
+
+    client.pair.assert_awaited_once()
+    assert dev._client is client
+
+
+@pytest.mark.asyncio
+async def test_client_pair_not_called_on_initial_attempt(monkeypatch):
+    """Verify client.pair() is NOT attempted on attempt 0 (fresh connection)."""
+    from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble import device as transport
+
+    dev = controller()
+    dev._attempt_pairing = True
+    dev._connect_attempt = 0  # Initial connection attempt
+    read_c = char(READ[0], ["notify"])
+    write_c = char(WRITE[0], ["write"])
+
+    client = SimpleNamespace(
+        pair=AsyncMock(),
+        start_notify=AsyncMock(),
+        read_gatt_char=AsyncMock(),
+        write_gatt_char=AsyncMock(),
+        is_connected=True,
+        services=[],
+        mtu_size=247,
+    )
+
+    monkeypatch.setattr(transport, "establish_connection", AsyncMock(return_value=client))
+    monkeypatch.setattr(dev, "_resolve_characteristics", lambda s: setattr(dev, "_read_char", read_c) or setattr(dev, "_write_char", write_c) or True)
+    monkeypatch.setattr(dev, "_initialize_telink_session", AsyncMock())
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    await dev._ensure_connected()
+
+    client.pair.assert_not_awaited()
+    assert dev._client is client
+
+
+@pytest.mark.asyncio
+async def test_pairing_disconnect_raises_clean_pairing_step_error(monkeypatch):
+    """Verify device disconnect during pairing raises BLEStepError with step='pairing'."""
+    from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble import device as transport
+    from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble.exceptions import BLEStepError
+
+    dev = controller()
+    dev._attempt_pairing = True
+    dev._initialize_telink_session = AsyncMock()
+    mock_client = SimpleNamespace(
+        is_connected=True,
+        services=[],
+        pair=AsyncMock(),
+        start_notify=AsyncMock(),
+        stop_notify=AsyncMock(),
+        disconnect=AsyncMock(),
+        mtu_size=247,
+    )
+
+    async def drop_on_pair():
+        mock_client.is_connected = False
+
+    mock_client.pair.side_effect = drop_on_pair
+    monkeypatch.setattr(transport, "establish_connection", AsyncMock(return_value=mock_client))
+    monkeypatch.setattr(dev, "_resolve_characteristics", lambda s: setattr(dev, "_read_char", char(READ[0], ["notify"])) or setattr(dev, "_write_char", char(WRITE[0], ["write"])) or True)
+
+    with pytest.raises(BLEStepError) as err:
+        await dev._ensure_connected(attempt=2)
+    assert err.value.step == "pairing"
+    assert err.value.code == "connect_failed"
+
+
+@pytest.mark.asyncio
+async def test_pairing_never_called_when_attempt_pairing_is_false(monkeypatch):
+    """Verify client.pair() is strictly opt-in and NEVER called on retry when attempt_pairing is False."""
+    from custom_components.ac_infinity_airtap_ble.vendor.ac_infinity_ble import device as transport
+
+    dev = controller()
+    assert dev.attempt_pairing is False
+    dev._initialize_telink_session = AsyncMock()
+    mock_client = SimpleNamespace(
+        is_connected=True,
+        services=[],
+        pair=AsyncMock(),
+        start_notify=AsyncMock(),
+        stop_notify=AsyncMock(),
+        disconnect=AsyncMock(),
+        mtu_size=247,
+    )
+
+    monkeypatch.setattr(transport, "establish_connection", AsyncMock(return_value=mock_client))
+    monkeypatch.setattr(dev, "_resolve_characteristics", lambda s: setattr(dev, "_read_char", char(READ[0], ["notify"])) or setattr(dev, "_write_char", char(WRITE[0], ["write"])) or True)
+
+    await dev._ensure_connected(attempt=2)
+    mock_client.pair.assert_not_awaited()
+    assert dev._client is mock_client
+

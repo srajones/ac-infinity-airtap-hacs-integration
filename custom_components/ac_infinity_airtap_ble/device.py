@@ -128,11 +128,13 @@ class ACInfinityDevice(ACInfinityController):
         state: DeviceInfoEx | None = None,
         advertisement_data: AdvertisementData | None = None,
         protocol_variant: str | None = None,
+        attempt_pairing: bool = False,
     ):
         super().__init__(
             ble_device=ble_device,
             state=state,
             advertisement_data=advertisement_data,
+            attempt_pairing=attempt_pairing,
         )
 
         if self._state.type not in DEVICE_MODEL:
